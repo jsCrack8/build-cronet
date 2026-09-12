@@ -13,7 +13,6 @@ env:
   CHROMIUM_ROOT: /home/runner/chromium
   CHROMIUM_SRC: /home/runner/chromium/src
   OUT_DIR: /home/runner/chromium/src/out/Cronet
-  PATH: /home/runner/depot_tools:${PATH}
   GIT_TERMINAL_PROMPT: '0'
   DEPOT_TOOLS_UPDATE: '1'
 
@@ -29,9 +28,11 @@ jobs:
         run: |
           set -euxo pipefail
           echo "=== OS ==="
+          command -v uname
           uname -a
           cat /etc/os-release || true
           echo "=== CPU ==="
+          command -v uname
           uname -m
           nproc
           echo "=== Memory ==="
@@ -44,8 +45,6 @@ jobs:
         run: |
           set -euxo pipefail
 
-          # Remove large preinstalled SDK/tool directories which are not needed
-          # for a Linux-only Chromium/Cronet build. Ignore paths that are absent.
           sudo rm -rf \
             /usr/local/lib/android \
             /usr/local/.ghcup \
@@ -108,25 +107,20 @@ jobs:
             "$DEPOT_TOOLS"
 
           export PATH="$DEPOT_TOOLS:$PATH"
+          echo "$DEPOT_TOOLS" >> "$GITHUB_PATH"
 
-          echo "=== depot_tools files ==="
-          test -x "$DEPOT_TOOLS/gclient"
-          test -x "$DEPOT_TOOLS/fetch"
-          ls -la "$DEPOT_TOOLS" | head -80
-
-          # IMPORTANT: the first gclient invocation bootstraps depot_tools and
-          # creates python3_bin_reldir.txt before fetch is used.
           cd /home/runner
+
+          # First gclient invocation bootstraps depot_tools' managed Python.
           gclient --version
 
-          echo "=== depot_tools bootstrap check ==="
-          test -f "$DEPOT_TOOLS/python3_bin_reldir.txt" \
-            || { echo "depot_tools bootstrap did not complete"; exit 1; }
+          test -f "$DEPOT_TOOLS/python3_bin_reldir.txt"
 
           command -v gclient
           command -v fetch
           command -v gn
           command -v autoninja
+
           gclient --version
           gn --version
           autoninja --version
@@ -135,10 +129,8 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
+          export PATH="$DEPOT_TOOLS:$PATH"
 
-          # Use Chromium's own dependency installer instead of maintaining a
-          # manually curated package list. Do not request lib32 dependencies:
-          # this workflow builds Linux x64 only.
           tmpdir="$(mktemp -d)"
           trap 'rm -rf "$tmpdir"' EXIT
 
@@ -164,34 +156,27 @@ jobs:
           mkdir -p "$CHROMIUM_ROOT"
           cd /home/runner
 
-          # No branch/tag/version is specified: fetch follows Chromium main.
-          # --no-history avoids downloading the repository's historical Git data.
           fetch --nohooks --no-history chromium
 
           cd "$CHROMIUM_SRC"
 
-          echo "=== Chromium revision ==="
           git rev-parse HEAD | tee /home/runner/chromium_revision.txt
 
-          echo "=== Chromium version ==="
           if [[ -f chrome/VERSION ]]; then
             cat chrome/VERSION | tee /home/runner/chromium_version.txt
           else
             git describe --tags --always | tee /home/runner/chromium_version.txt
           fi
 
-          echo "=== Disk after checkout ==="
           df -h /
 
-      - name: Sync DEPS and run required Chromium hooks
+      - name: Sync DEPS and run Chromium hooks
         shell: bash
         run: |
           set -euxo pipefail
           export PATH="$DEPOT_TOOLS:$PATH"
           cd "$CHROMIUM_SRC"
 
-          # Keep dependency repositories shallow where supported and avoid
-          # retaining their historical Git objects.
           gclient sync \
             --no-history \
             --force \
@@ -200,7 +185,6 @@ jobs:
 
           gclient runhooks
 
-          echo "=== Disk after DEPS/hooks ==="
           df -h /
 
       - name: Generate GN files for Linux x64 Cronet
@@ -212,22 +196,20 @@ jobs:
 
           rm -rf "$OUT_DIR"
 
-          gn gen "$OUT_DIR" --args=''
-            target_cpu = "x64"
-            is_debug = false
-            is_component_build = false
-            symbol_level = 0
-            blink_symbol_level = 0
-            v8_symbol_level = 0
-            enable_nacl = false
-            use_goma = false
-            dcheck_always_on = false
-          ''
+          gn gen "$OUT_DIR" --args='\
+          target_cpu = "x64"\
+          is_debug = false\
+          is_component_build = false\
+          is_official_build = true\
+          symbol_level = 0\
+          blink_symbol_level = 0\
+          v8_symbol_level = 0\
+          enable_nacl = false\
+          dcheck_always_on = false\
+          use_goma = false\
+          '
 
-          echo "=== GN args ==="
           gn args "$OUT_DIR" --list > /home/runner/gn_args.txt
-
-          echo "=== Cronet target description ==="
           gn desc "$OUT_DIR" //components/cronet:cronet > /home/runner/gn_cronet_desc.txt
 
       - name: Build Cronet shared library only
@@ -237,61 +219,49 @@ jobs:
           export PATH="$DEPOT_TOOLS:$PATH"
           cd "$CHROMIUM_SRC"
 
-          # Build only the Linux native Cronet target; do not build Chrome.
           autoninja -C "$OUT_DIR" //components/cronet:cronet
 
-      - name: Locate and verify Cronet x64 shared library
+      - name: Collect and verify Cronet library
         shell: bash
         run: |
           set -euxo pipefail
+          cd "$CHROMIUM_SRC"
 
           mkdir -p /home/runner/cronet-artifact
 
-          echo "=== Candidate Cronet libraries ==="
-          find "$OUT_DIR" -type f \( \
-            -name 'libcronet*.so' -o \
-            -name 'cronet*.so' \
-          \) -print | sort
-
-          found="$(find "$OUT_DIR" -type f \( \
-            -name 'libcronet*.so' -o \
-            -name 'cronet*.so' \
-          \) -print -quit)"
+          found=""
+          while IFS= read -r f; do
+            found="$f"
+            break
+          done < <(find "$OUT_DIR" -type f \( -name 'libcronet.so' -o -name 'libcronet*.so' \) -print | sort)
 
           if [[ -z "$found" ]]; then
-            echo "ERROR: No Cronet shared library was produced."
-            echo "All generated shared libraries:"
-            find "$OUT_DIR" -type f -name '*.so*' -print | sort | head -300 || true
+            echo "ERROR: Cronet .so was not produced."
+            echo "Available shared libraries:"
+            find "$OUT_DIR" -type f -name '*.so*' -print | head -200 || true
             exit 1
           fi
 
-          echo "Selected library: $found"
           cp -L "$found" /home/runner/cronet-artifact/libcronet.so
 
-          echo "=== file ==="
+          echo "Source file: $found"
           file /home/runner/cronet-artifact/libcronet.so
-
-          echo "=== ELF header ==="
           readelf -h /home/runner/cronet-artifact/libcronet.so
 
-          echo "=== Architecture check ==="
-          file /home/runner/cronet-artifact/libcronet.so | grep -E 'ELF 64-bit.*x86-64'
+          file /home/runner/cronet-artifact/libcronet.so | grep -E 'ELF 64-bit.*x86-64' || {
+            echo "ERROR: output is not Linux x86-64 ELF"
+            exit 1
+          }
 
-          echo "=== SHA256 ==="
-          sha256sum /home/runner/cronet-artifact/libcronet.so \
-            | tee /home/runner/cronet-artifact/SHA256SUMS.txt
-
-          chromium_revision="$(git -C "$CHROMIUM_SRC" rev-parse HEAD)"
-          chromium_version="$(tr '\n' ' ' < "$CHROMIUM_SRC/chrome/VERSION" 2>/dev/null || true)"
+          sha256sum /home/runner/cronet-artifact/libcronet.so > /home/runner/cronet-artifact/SHA256SUMS.txt
 
           cat > /home/runner/cronet-artifact/build-info.txt <<EOF
-          Chromium revision: ${chromium_revision}
-          Chromium version: ${chromium_version}
+          Chromium revision: $(git -C "$CHROMIUM_SRC" rev-parse HEAD)
+          Chromium version: $(tr '\n' ' ' < "$CHROMIUM_SRC/chrome/VERSION" 2>/dev/null || true)
           Runner: ubuntu-latest
-          OS architecture: x86_64
+          Architecture: x86_64
           GN target: //components/cronet:cronet
-          Output: libcronet.so
-          Original file: ${found}
+          Original library: $found
           EOF
 
       - name: Upload Cronet artifact
