@@ -1,43 +1,111 @@
-name: Build Cronet (Win & Linux)
+name: Build Cronet (Windows & Linux)
 
 on:
-  workflow_dispatch: # 支持手动触发
+  workflow_dispatch:
   push:
-    branches: [ main ]
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+env:
+  # Chromium 工作目录
+  CHROMIUM_ROOT_LINUX: ${{ github.workspace }}/chromium
+  CHROMIUM_ROOT_WINDOWS: C:/chromium
 
 jobs:
-  # ==========================================
-  # Linux: 编译 libcronet.so
-  # ==========================================
+  # ============================================================
+  # Linux x64
+  # Output:
+  #   libcronet*.so
+  # ============================================================
   build-linux:
+    name: Build Cronet - Linux x64
     runs-on: ubuntu-22.04
+
     steps:
+      # --------------------------------------------------------
+      # Free disk space
+      # --------------------------------------------------------
       - name: Free Disk Space
+        shell: bash
         run: |
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /opt/ghc
-          sudo rm -rf "/usr/local/share/boost"
-          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+          set -eux
+
+          sudo rm -rf /usr/share/dotnet || true
+          sudo rm -rf /usr/local/lib/android || true
+          sudo rm -rf /opt/ghc || true
+          sudo rm -rf /usr/local/share/boost || true
+          sudo rm -rf "${AGENT_TOOLSDIRECTORY:-/nonexistent}" || true
+
           df -h
 
+      # --------------------------------------------------------
+      # Install basic dependencies
+      # --------------------------------------------------------
       - name: Install Dependencies
+        shell: bash
         run: |
+          set -eux
+
           sudo apt-get update
-          sudo apt-get install -y python3 python3-pip git curl build-essential libglib2.0-dev libnss3-dev libdbus-1-dev
 
+          sudo apt-get install -y \
+            git \
+            curl \
+            python3 \
+            python3-pip \
+            build-essential \
+            pkg-config \
+            libglib2.0-dev \
+            libnss3-dev \
+            libdbus-1-dev \
+            ca-certificates
+
+      # --------------------------------------------------------
+      # Install depot_tools
+      # --------------------------------------------------------
       - name: Install depot_tools
+        shell: bash
         run: |
-          git clone --depth 1 https://chromium.googlesource.com/chromium/tools/depot_tools.git $HOME/depot_tools
-          echo "$HOME/depot_tools" >> $GITHUB_PATH
+          set -eux
 
-      - name: Fetch Chromium Source (Shallow & Latest only)
-        run: |
+          git clone \
+            --depth 1 \
+            --filter=blob:none \
+            https://chromium.googlesource.com/chromium/tools/depot_tools.git \
+            "$HOME/depot_tools"
+
+          echo "$HOME/depot_tools" >> "$GITHUB_PATH"
+
           export PATH="$HOME/depot_tools:$PATH"
-          mkdir -p chromium && cd chromium
-          
-          # 创建不包含历史版本的 gclient 配置
-          cat << 'EOF' > .gclient
+
+          gclient --version
+          gn --version || true
+          autoninja --version || true
+
+      # --------------------------------------------------------
+      # Checkout Chromium latest only
+      #
+      # Important:
+      #   --no-history     => 不拉 Git 历史
+      #   --shallow        => 尽量保持浅 checkout
+      #
+      # custom_vars:
+      #   禁止 Android / iOS / Mac / Windows 依赖
+      # --------------------------------------------------------
+      - name: Fetch Latest Chromium
+        shell: bash
+        run: |
+          set -eux
+
+          export PATH="$HOME/depot_tools:$PATH"
+
+          mkdir -p "$CHROMIUM_ROOT_LINUX"
+          cd "$CHROMIUM_ROOT_LINUX"
+
+          cat > .gclient <<'EOF'
           solutions = [
             {
               "name": "src",
@@ -45,110 +113,551 @@ jobs:
               "deps_file": "DEPS",
               "managed": False,
               "custom_deps": {},
-              "custom_vars": {},
+              "custom_vars": {
+                "checkout_android": False,
+                "checkout_android_prebuilts": False,
+                "checkout_android_native_support": False,
+                "checkout_ios": False,
+                "checkout_mac": False,
+                "checkout_win": False,
+                "checkout_linux": True,
+              },
             },
           ]
           EOF
 
-          # --no-history 和 --shallow-submodules 极大减少下载量与历史记录
-          gclient sync --no-history --shallow --nohooks -j 8
+          gclient sync \
+            --no-history \
+            --shallow \
+            --nohooks \
+            -j 8
 
-          cd src
-          # 安装系统依赖并执行环境 hooks
-          build/install-build-deps.sh --no-prompt --no-chromeos-fonts
+      # --------------------------------------------------------
+      # Chromium build dependencies
+      # --------------------------------------------------------
+      - name: Install Chromium Build Dependencies
+        shell: bash
+        run: |
+          set -eux
+
+          export PATH="$HOME/depot_tools:$PATH"
+
+          cd "$CHROMIUM_ROOT_LINUX/src"
+
+          ./build/install-build-deps.sh \
+            --no-prompt \
+            --no-chromeos-fonts \
+            --no-android
+
+      # --------------------------------------------------------
+      # Run hooks
+      # --------------------------------------------------------
+      - name: Run Chromium Hooks
+        shell: bash
+        run: |
+          set -eux
+
+          export PATH="$HOME/depot_tools:$PATH"
+
+          cd "$CHROMIUM_ROOT_LINUX/src"
+
           gclient runhooks
 
-      - name: GN Gen & Build Cronet (.so)
+      # --------------------------------------------------------
+      # Create a minimal desktop Cronet target
+      #
+      # Current Chromium main no longer exposes the historical
+      # desktop //components/cronet:cronet shared_library target.
+      #
+      # We therefore add a tiny target which links:
+      #
+      #   cronet_common
+      #   cronet_native_impl
+      #   net
+      #   base
+      #
+      # This avoids building the Chrome browser target.
+      # --------------------------------------------------------
+      - name: Add Desktop Cronet Target
+        shell: bash
         run: |
+          set -eux
+
+          cd "$CHROMIUM_ROOT_LINUX/src"
+
+          cat >> components/cronet/BUILD.gn <<'EOF'
+
+          # ==========================================================
+          # MeowShield Desktop Cronet
+          # ==========================================================
+          #
+          # Standalone desktop shared library:
+          #
+          #   Linux   -> libcronet.<version>.so
+          #   Windows -> cronet.<version>.dll
+          #
+          # This intentionally avoids building the Chromium browser.
+          #
+          if (!is_android && !is_ios) {
+            shared_library("cronet_desktop") {
+              output_name = "cronet"
+
+              deps = [
+                ":cronet_common",
+                "//components/cronet/native:cronet_native_impl",
+                "//net",
+                "//base",
+              ]
+
+              sources = [
+                "cronet_global_state_stubs.cc",
+              ]
+            }
+          }
+
+          EOF
+
+      # --------------------------------------------------------
+      # GN configuration
+      # --------------------------------------------------------
+      - name: GN Generate
+        shell: bash
+        run: |
+          set -eux
+
           export PATH="$HOME/depot_tools:$PATH"
-          cd chromium/src
-          
+
+          cd "$CHROMIUM_ROOT_LINUX/src"
+
+          rm -rf out/Release
+
           mkdir -p out/Release
-          # 仅编译必要的 cronet 产物，关闭测试与非必要模块以节省时间和空间
-          cat << 'EOF' > out/Release/args.gn
-          is_component_build = false
+
+          cat > out/Release/args.gn <<'EOF'
+          # Release
           is_debug = false
+
+          # We only need the Cronet shared library.
+          is_component_build = false
+
+          # x64
+          target_cpu = "x64"
+
+          # Strip symbols to reduce artifact size.
           symbol_level = 0
+          blink_symbol_level = 0
+          v8_symbol_level = 0
+
+          # Chromium libc++
           use_custom_libcxx = true
+
+          # Avoid unrelated diagnostics becoming fatal.
           treat_warnings_as_errors = false
+
+          # Do not create unnecessary Chrome artifacts.
+          is_official_build = false
+          chrome_pgo_phase = 0
+          disable_nacl = true
+
+          # Add only our target to the build graph.
+          root_extra_deps = [
+            "//components/cronet:cronet_desktop",
+          ]
           EOF
 
           gn gen out/Release
-          # 仅编译 cronet
-          ninja -C out/Release cronet
 
-      - name: Upload Linux Cronet (.so)
+          gn args out/Release --list > out/Release/gn_args.txt
+
+      # --------------------------------------------------------
+      # Build only Cronet
+      # --------------------------------------------------------
+      - name: Build Cronet
+        shell: bash
+        run: |
+          set -eux
+
+          export PATH="$HOME/depot_tools:$PATH"
+
+          cd "$CHROMIUM_ROOT_LINUX/src"
+
+          autoninja \
+            -C out/Release \
+            //components/cronet:cronet_desktop
+
+      # --------------------------------------------------------
+      # Locate output
+      # --------------------------------------------------------
+      - name: Locate Cronet Output
+        shell: bash
+        run: |
+          set -eux
+
+          cd "$CHROMIUM_ROOT_LINUX/src"
+
+          echo "===== Cronet shared libraries ====="
+
+          find out/Release \
+            -type f \
+            \( \
+              -name "libcronet*.so" \
+              -o -name "cronet*.so" \
+            \) \
+            -print
+
+          echo "===== Largest output files ====="
+
+          find out/Release \
+            -type f \
+            -printf '%s %p\n' \
+            | sort -nr \
+            | head -30
+
+          echo "===== Disk ====="
+          df -h
+
+          CRONET_COUNT=$(find out/Release \
+            -type f \
+            \( \
+              -name "libcronet*.so" \
+              -o -name "cronet*.so" \
+            \) \
+            | wc -l)
+
+          if [ "$CRONET_COUNT" -eq 0 ]; then
+            echo "ERROR: Cronet .so was not generated."
+            exit 1
+          fi
+
+      # --------------------------------------------------------
+      # Strip / normalize artifact directory
+      # --------------------------------------------------------
+      - name: Prepare Linux Artifact
+        shell: bash
+        run: |
+          set -eux
+
+          cd "$CHROMIUM_ROOT_LINUX/src"
+
+          rm -rf "$GITHUB_WORKSPACE/artifacts"
+          mkdir -p "$GITHUB_WORKSPACE/artifacts/linux"
+
+          find out/Release \
+            -type f \
+            \( \
+              -name "libcronet*.so" \
+              -o -name "cronet*.so" \
+            \) \
+            -exec cp {} "$GITHUB_WORKSPACE/artifacts/linux/" \;
+
+          ls -lh "$GITHUB_WORKSPACE/artifacts/linux"
+
+      # --------------------------------------------------------
+      # Upload
+      # --------------------------------------------------------
+      - name: Upload Linux Cronet
         uses: actions/upload-artifact@v4
         with:
-          name: cronet-linux
-          path: chromium/src/out/Release/libcronet.*.so
+          name: cronet-linux-x64
+          path: artifacts/linux/
+          if-no-files-found: error
+          retention-days: 7
 
 
-  # ==========================================
-  # Windows: 编译 cronet.dll
-  # ==========================================
+  # ============================================================
+  # Windows x64
+  #
+  # Output:
+  #   cronet*.dll
+  #   cronet*.lib
+  # ============================================================
   build-windows:
+    name: Build Cronet - Windows x64
     runs-on: windows-2022
+
     steps:
+      # --------------------------------------------------------
+      # Git configuration
+      # --------------------------------------------------------
       - name: Configure Git
-        shell: bash
+        shell: powershell
         run: |
           git config --system core.longpaths true
 
+      # --------------------------------------------------------
+      # Install depot_tools
+      # --------------------------------------------------------
       - name: Install depot_tools
-        shell: bash
+        shell: powershell
         run: |
-          git clone --depth 1 https://chromium.googlesource.com/chromium/tools/depot_tools.git /c/depot_tools
-          # depot_tools 必须在 PATH 最前端
-          echo "C:/depot_tools" >> $GITHUB_PATH
-          echo "DEPOT_TOOLS_WIN_TOOLCHAIN=0" >> $GITHUB_ENV
+          $ErrorActionPreference = "Stop"
 
-      - name: Fetch Chromium Source (Shallow & Latest only)
-        shell: bash
+          if (Test-Path "C:\depot_tools") {
+            Remove-Item -Recurse -Force "C:\depot_tools"
+          }
+
+          git clone `
+            --depth 1 `
+            --filter=blob:none `
+            https://chromium.googlesource.com/chromium/tools/depot_tools.git `
+            C:\depot_tools
+
+          Add-Content `
+            -Path $env:GITHUB_PATH `
+            -Value "C:\depot_tools"
+
+      # --------------------------------------------------------
+      # Chromium uses local VS toolchain on GitHub runner
+      # --------------------------------------------------------
+      - name: Configure Windows Toolchain
+        shell: powershell
         run: |
-          export PATH="/c/depot_tools:$PATH"
-          mkdir -p /c/chromium && cd /c/chromium
+          Add-Content `
+            -Path $env:GITHUB_ENV `
+            -Value "DEPOT_TOOLS_WIN_TOOLCHAIN=0"
 
-          cat << 'EOF' > .gclient
-          solutions = [
-            {
-              "name": "src",
-              "url": "https://chromium.googlesource.com/chromium/src.git",
-              "deps_file": "DEPS",
-              "managed": False,
-              "custom_deps": {},
-              "custom_vars": {},
-            },
-          ]
-          EOF
+      # --------------------------------------------------------
+      # Fetch latest Chromium
+      # --------------------------------------------------------
+      - name: Fetch Latest Chromium
+        shell: cmd
+        run: |
+          set PATH=C:\depot_tools;%PATH%
 
-          # 仅拉取最新 commit，不拉取历史
-          gclient sync --no-history --shallow --nohooks -j 8
-          cd src
+          cd /d C:\
+
+          if exist C:\chromium (
+            rmdir /s /q C:\chromium
+          )
+
+          mkdir C:\chromium
+
+          cd /d C:\chromium
+
+          (
+            echo solutions = [
+            echo   {
+            echo     "name": "src",
+            echo     "url": "https://chromium.googlesource.com/chromium/src.git",
+            echo     "deps_file": "DEPS",
+            echo     "managed": False,
+            echo     "custom_deps": {},
+            echo     "custom_vars": {
+            echo       "checkout_android": False,
+            echo       "checkout_android_prebuilts": False,
+            echo       "checkout_android_native_support": False,
+            echo       "checkout_ios": False,
+            echo       "checkout_mac": False,
+            echo       "checkout_win": True,
+            echo       "checkout_linux": False,
+            echo     },
+            echo   },
+            echo ]
+          ) > .gclient
+
+          gclient sync ^
+            --no-history ^
+            --shallow ^
+            --nohooks ^
+            -j 8
+
+      # --------------------------------------------------------
+      # Hooks
+      # --------------------------------------------------------
+      - name: Run Chromium Hooks
+        shell: cmd
+        run: |
+          set PATH=C:\depot_tools;%PATH%
+
+          cd /d C:\chromium\src
+
           gclient runhooks
 
-      - name: GN Gen & Build Cronet (.dll)
-        shell: bash
+      # --------------------------------------------------------
+      # Add desktop Cronet shared library target
+      # --------------------------------------------------------
+      - name: Add Desktop Cronet Target
+        shell: powershell
         run: |
-          export PATH="/c/depot_tools:$PATH"
-          cd /c/chromium/src
+          $ErrorActionPreference = "Stop"
 
-          mkdir -p out/Release
-          cat << 'EOF' > out/Release/args.gn
-          is_component_build = false
-          is_debug = false
-          symbol_level = 0
-          treat_warnings_as_errors = false
-          EOF
+          $buildFile = "C:\chromium\src\components\cronet\BUILD.gn"
 
-          gn gen out/Release
-          # 仅编译 cronet
-          ninja -C out/Release cronet
+          @'
 
-      - name: Upload Windows Cronet (.dll)
+          # ==========================================================
+          # MeowShield Desktop Cronet
+          # ==========================================================
+          #
+          # Standalone desktop shared library:
+          #
+          #   Windows -> cronet.dll
+          #
+          if (!is_android && !is_ios) {
+            shared_library("cronet_desktop") {
+              output_name = "cronet"
+
+              deps = [
+                ":cronet_common",
+                "//components/cronet/native:cronet_native_impl",
+                "//net",
+                "//base",
+              ]
+
+              sources = [
+                "cronet_global_state_stubs.cc",
+              ]
+            }
+          }
+
+          '@ | Add-Content -Path $buildFile
+
+      # --------------------------------------------------------
+      # GN
+      # --------------------------------------------------------
+      - name: GN Generate
+        shell: cmd
+        run: |
+          set PATH=C:\depot_tools;%PATH%
+
+          cd /d C:\chromium\src
+
+          if exist out\Release (
+            rmdir /s /q out\Release
+          )
+
+          mkdir out\Release
+
+          (
+            echo is_debug = false
+            echo is_component_build = false
+            echo target_cpu = "x64"
+            echo symbol_level = 0
+            echo blink_symbol_level = 0
+            echo v8_symbol_level = 0
+            echo treat_warnings_as_errors = false
+            echo is_official_build = false
+            echo chrome_pgo_phase = 0
+            echo disable_nacl = true
+            echo root_extra_deps = [
+            echo   "//components/cronet:cronet_desktop",
+            echo ]
+          ) > out\Release\args.gn
+
+          gn gen out\Release
+
+          gn args out\Release --list > out\Release\gn_args.txt
+
+      # --------------------------------------------------------
+      # Build
+      # --------------------------------------------------------
+      - name: Build Cronet
+        shell: cmd
+        run: |
+          set PATH=C:\depot_tools;%PATH%
+
+          cd /d C:\chromium\src
+
+          autoninja ^
+            -C out\Release ^
+            //components/cronet:cronet_desktop
+
+      # --------------------------------------------------------
+      # Find generated DLL/LIB
+      # --------------------------------------------------------
+      - name: Locate Cronet Output
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          Write-Host "===== Cronet DLL ====="
+
+          $dlls = Get-ChildItem `
+            "C:\chromium\src\out\Release" `
+            -Recurse `
+            -File `
+            -Include "cronet*.dll"
+
+          if ($dlls.Count -eq 0) {
+            Write-Error "Cronet DLL was not generated."
+            exit 1
+          }
+
+          $dlls |
+            Select-Object FullName, Length |
+            Format-Table -AutoSize
+
+          Write-Host "===== Cronet LIB ====="
+
+          $libs = Get-ChildItem `
+            "C:\chromium\src\out\Release" `
+            -Recurse `
+            -File `
+            -Include "cronet*.lib"
+
+          $libs |
+            Select-Object FullName, Length |
+            Format-Table -AutoSize
+
+      # --------------------------------------------------------
+      # Prepare artifact
+      # --------------------------------------------------------
+      - name: Prepare Windows Artifact
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $artifact = "$env:GITHUB_WORKSPACE\artifacts\windows"
+
+          if (Test-Path $artifact) {
+            Remove-Item -Recurse -Force $artifact
+          }
+
+          New-Item -ItemType Directory -Force -Path $artifact | Out-Null
+
+          $dlls = Get-ChildItem `
+            "C:\chromium\src\out\Release" `
+            -Recurse `
+            -File `
+            -Include "cronet*.dll"
+
+          if ($dlls.Count -eq 0) {
+            throw "No Cronet DLL found."
+          }
+
+          foreach ($file in $dlls) {
+            Copy-Item `
+              $file.FullName `
+              $artifact `
+              -Force
+          }
+
+          $libs = Get-ChildItem `
+            "C:\chromium\src\out\Release" `
+            -Recurse `
+            -File `
+            -Include "cronet*.lib"
+
+          foreach ($file in $libs) {
+            Copy-Item `
+              $file.FullName `
+              $artifact `
+              -Force
+          }
+
+          Write-Host "===== Final artifact ====="
+
+          Get-ChildItem $artifact |
+            Select-Object Name, Length |
+            Format-Table -AutoSize
+
+      # --------------------------------------------------------
+      # Upload
+      # --------------------------------------------------------
+      - name: Upload Windows Cronet
         uses: actions/upload-artifact@v4
         with:
-          name: cronet-windows
-          path: |
-            C:/chromium/src/out/Release/cronet.dll
-            C:/chromium/src/out/Release/cronet.dll.lib
+          name: cronet-windows-x64
+          path: artifacts/windows/
+          if-no-files-found: error
+          retention-days: 7
