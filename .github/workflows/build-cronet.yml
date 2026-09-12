@@ -10,6 +10,7 @@ permissions:
   contents: read
 
 jobs:
+
   # ============================================================
   # Linux x64
   # ============================================================
@@ -18,9 +19,7 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-      # ----------------------------------------------------------
-      # Free disk space
-      # ----------------------------------------------------------
+
       - name: Free Disk Space
         shell: bash
         run: |
@@ -30,13 +29,9 @@ jobs:
           sudo rm -rf /usr/local/lib/android || true
           sudo rm -rf /opt/ghc || true
           sudo rm -rf /usr/local/share/boost || true
-          sudo rm -rf "${AGENT_TOOLSDIRECTORY:-/nonexistent}" || true
 
           df -h
 
-      # ----------------------------------------------------------
-      # Basic dependencies
-      # ----------------------------------------------------------
       - name: Install Dependencies
         shell: bash
         run: |
@@ -56,9 +51,6 @@ jobs:
             libdbus-1-dev \
             ca-certificates
 
-      # ----------------------------------------------------------
-      # depot_tools
-      # ----------------------------------------------------------
       - name: Install depot_tools
         shell: bash
         run: |
@@ -74,22 +66,6 @@ jobs:
 
           echo "$HOME/depot_tools" >> "$GITHUB_PATH"
 
-          export PATH="$HOME/depot_tools:$PATH"
-
-          gclient --version
-
-      # ----------------------------------------------------------
-      # Latest Chromium
-      #
-      # --no-history:
-      #   不下载 Git 历史
-      #
-      # --shallow:
-      #   浅 checkout
-      #
-      # checkout_*:
-      #   禁止不需要的平台依赖
-      # ----------------------------------------------------------
       - name: Fetch Latest Chromium
         shell: bash
         run: |
@@ -130,9 +106,6 @@ jobs:
             --nohooks \
             -j 8
 
-      # ----------------------------------------------------------
-      # Chromium build dependencies
-      # ----------------------------------------------------------
       - name: Install Chromium Build Dependencies
         shell: bash
         run: |
@@ -147,9 +120,6 @@ jobs:
             --no-chromeos-fonts \
             --no-android
 
-      # ----------------------------------------------------------
-      # Hooks
-      # ----------------------------------------------------------
       - name: Run Chromium Hooks
         shell: bash
         run: |
@@ -162,34 +132,17 @@ jobs:
           gclient runhooks
 
       # ----------------------------------------------------------
-      # Patch Cronet BUILD.gn for desktop
-      #
-      # Current Chromium main has Android-specific dependencies
-      # inside components/cronet/BUILD.gn.
-      #
-      # We convert them to Android-only and restore a desktop
-      # shared library target.
+      # Patch current Cronet BUILD.gn
       # ----------------------------------------------------------
       - name: Patch Cronet BUILD
         shell: python3
         run: |
           from pathlib import Path
 
-          path = Path(
-              "chromium/src/components/cronet/BUILD.gn"
-          )
+          path = Path("chromium/src/components/cronet/BUILD.gn")
 
           text = path.read_text(encoding="utf-8")
 
-          # ------------------------------------------------------
-          # 1. Android rules import:
-          #
-          # Current main:
-          #
-          # import("//build/config/android/rules.gni")
-          #
-          # This cannot be loaded on Linux/Windows.
-          # ------------------------------------------------------
           old = 'import("//build/config/android/rules.gni")'
 
           if old in text:
@@ -200,84 +153,14 @@ jobs:
                   '}'
               )
 
-          # ------------------------------------------------------
-          # 2. request_context_config_java_proto
-          #
-          # Java proto target is Android-only.
-          # ------------------------------------------------------
-          old_block = '''proto_java_library("request_context_config_java_proto") {
-  proto_path = "."
-  sources = [ "proto/request_context_config.proto" ]
-}
-'''
-
-          if old_block in text:
-              text = text.replace(
-                  old_block,
-                  '''if (is_android) {
-  proto_java_library("request_context_config_java_proto") {
-    proto_path = "."
-    sources = [ "proto/request_context_config.proto" ]
-  }
-}
-'''
-              )
-
-          # ------------------------------------------------------
-          # 3. Remove Android JNI dependency from desktop build.
-          #
-          # Existing:
-          #
-          # "//components/cronet/android:cronet_jni_headers",
-          #
-          # Replace with conditional deps.
-          # ------------------------------------------------------
-          old_dep = (
-              '    "//components/cronet/android:cronet_jni_headers",\n'
-          )
+          old_dep = '    "//components/cronet/android:cronet_jni_headers",\n'
 
           if old_dep in text:
               text = text.replace(old_dep, "")
 
-          # ------------------------------------------------------
-          # 4. Append Android JNI dependency only on Android.
-          # ------------------------------------------------------
-          marker = '''public_deps = [ "//components/metrics:library_support" ]
-'''
-
-          if marker in text and (
-              'cronet_common_android_deps' not in text
-          ):
-              replacement = '''if (is_android) {
-  source_set("cronet_common_android_deps") {
-    public_deps = [
-      "//components/cronet/android:cronet_jni_headers",
-    ]
-  }
-}
-
-public_deps = [ "//components/metrics:library_support" ]
-'''
-
-              text = text.replace(
-                  marker,
-                  replacement,
-                  1
-              )
-
-          # ------------------------------------------------------
-          # 5. Restore desktop shared library.
-          # ------------------------------------------------------
           if 'shared_library("cronet")' not in text:
-              text += '''
+              text += r'''
 
-# ==============================================================
-# Desktop Cronet shared library
-# ==============================================================
-#
-# Android and iOS use their own platform-specific packaging.
-# Linux/Windows use this native shared library.
-#
 if (!is_android && !is_ios) {
   shared_library("cronet") {
     output_name = "cronet"
@@ -299,13 +182,9 @@ if (!is_android && !is_ios) {
 
           path.write_text(text, encoding="utf-8")
 
-          print("===== Patched BUILD.gn =====")
-          print(path.read_text(encoding="utf-8"))
+          print("Cronet BUILD.gn patched successfully.")
 
-      # ----------------------------------------------------------
-      # GN
-      # ----------------------------------------------------------
-      - name: GN Generate
+      - name: Generate GN
         shell: bash
         run: |
           set -eux
@@ -320,7 +199,6 @@ if (!is_android && !is_ios) {
 
           cat > out/Release/args.gn <<'EOF'
           is_debug = false
-
           is_component_build = false
 
           target_cpu = "x64"
@@ -343,9 +221,6 @@ if (!is_android && !is_ios) {
 
           gn gen out/Release
 
-      # ----------------------------------------------------------
-      # Build ONLY Cronet
-      # ----------------------------------------------------------
       - name: Build Cronet
         shell: bash
         run: |
@@ -359,17 +234,12 @@ if (!is_android && !is_ios) {
             -C out/Release \
             //components/cronet:cronet
 
-      # ----------------------------------------------------------
-      # Verify output
-      # ----------------------------------------------------------
-      - name: Verify Linux Cronet
+      - name: Verify Linux Output
         shell: bash
         run: |
           set -eux
 
           cd "$GITHUB_WORKSPACE/chromium/src"
-
-          echo "===== Cronet output ====="
 
           find out/Release \
             -type f \
@@ -384,17 +254,13 @@ if (!is_android && !is_ios) {
             \( \
               -name "libcronet*.so" \
               -o -name "cronet*.so" \
-            \) \
-            | wc -l)
+            \) | wc -l)
 
           if [ "$COUNT" -eq 0 ]; then
-            echo "ERROR: Cronet .so not found."
+            echo "ERROR: Cronet .so was not generated."
             exit 1
           fi
 
-      # ----------------------------------------------------------
-      # Prepare artifact
-      # ----------------------------------------------------------
       - name: Prepare Linux Artifact
         shell: bash
         run: |
@@ -417,9 +283,6 @@ if (!is_android && !is_ios) {
 
           ls -lah "$DST"
 
-      # ----------------------------------------------------------
-      # Upload
-      # ----------------------------------------------------------
       - name: Upload Linux Cronet
         uses: actions/upload-artifact@v4
         with:
@@ -437,17 +300,12 @@ if (!is_android && !is_ios) {
     runs-on: windows-2022
 
     steps:
-      # ----------------------------------------------------------
-      # Git
-      # ----------------------------------------------------------
+
       - name: Configure Git
         shell: powershell
         run: |
           git config --system core.longpaths true
 
-      # ----------------------------------------------------------
-      # depot_tools
-      # ----------------------------------------------------------
       - name: Install depot_tools
         shell: cmd
         run: |
@@ -463,17 +321,11 @@ if (!is_android && !is_ios) {
 
           echo C:\depot_tools>>%GITHUB_PATH%
 
-      # ----------------------------------------------------------
-      # Use system Visual Studio
-      # ----------------------------------------------------------
       - name: Configure Windows Toolchain
         shell: cmd
         run: |
           echo DEPOT_TOOLS_WIN_TOOLCHAIN=0>>%GITHUB_ENV%
 
-      # ----------------------------------------------------------
-      # Chromium
-      # ----------------------------------------------------------
       - name: Fetch Latest Chromium
         shell: cmd
         run: |
@@ -514,9 +366,6 @@ if (!is_android && !is_ios) {
             --nohooks ^
             -j 8
 
-      # ----------------------------------------------------------
-      # Hooks
-      # ----------------------------------------------------------
       - name: Run Chromium Hooks
         shell: cmd
         run: |
@@ -526,21 +375,15 @@ if (!is_android && !is_ios) {
 
           gclient runhooks
 
-      # ----------------------------------------------------------
-      # Patch Cronet BUILD.gn
-      # ----------------------------------------------------------
       - name: Patch Cronet BUILD
         shell: python
         run: |
           from pathlib import Path
 
-          path = Path(
-              r"C:\chromium\src\components\cronet\BUILD.gn"
-          )
+          path = Path(r"C:\chromium\src\components\cronet\BUILD.gn")
 
           text = path.read_text(encoding="utf-8")
 
-          # Android rules
           old = 'import("//build/config/android/rules.gni")'
 
           if old in text:
@@ -551,40 +394,13 @@ if (!is_android && !is_ios) {
                   '}'
               )
 
-          # Android Java proto
-          old_block = '''proto_java_library("request_context_config_java_proto") {
-  proto_path = "."
-  sources = [ "proto/request_context_config.proto" ]
-}
-'''
-
-          if old_block in text:
-              text = text.replace(
-                  old_block,
-                  '''if (is_android) {
-  proto_java_library("request_context_config_java_proto") {
-    proto_path = "."
-    sources = [ "proto/request_context_config.proto" ]
-  }
-}
-'''
-              )
-
-          # Android JNI dep
-          old_dep = (
-              '    "//components/cronet/android:cronet_jni_headers",\n'
-          )
+          old_dep = '    "//components/cronet/android:cronet_jni_headers",\n'
 
           if old_dep in text:
               text = text.replace(old_dep, "")
 
-          # Desktop library
           if 'shared_library("cronet")' not in text:
-              text += '''
-
-# ==============================================================
-# Desktop Cronet shared library
-# ==============================================================
+              text += r'''
 
 if (!is_android && !is_ios) {
   shared_library("cronet") {
@@ -607,13 +423,9 @@ if (!is_android && !is_ios) {
 
           path.write_text(text, encoding="utf-8")
 
-          print("===== Patched BUILD.gn =====")
-          print(path.read_text(encoding="utf-8"))
+          print("Cronet BUILD.gn patched successfully.")
 
-      # ----------------------------------------------------------
-      # GN
-      # ----------------------------------------------------------
-      - name: GN Generate
+      - name: Generate GN
         shell: cmd
         run: |
           set PATH=C:\depot_tools;%PATH%
@@ -643,9 +455,6 @@ if (!is_android && !is_ios) {
 
           gn gen out\Release
 
-      # ----------------------------------------------------------
-      # Build ONLY Cronet
-      # ----------------------------------------------------------
       - name: Build Cronet
         shell: cmd
         run: |
@@ -657,10 +466,7 @@ if (!is_android && !is_ios) {
             -C out\Release ^
             //components/cronet:cronet
 
-      # ----------------------------------------------------------
-      # Verify
-      # ----------------------------------------------------------
-      - name: Verify Windows Cronet
+      - name: Verify Windows Output
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
@@ -676,7 +482,7 @@ if (!is_android && !is_ios) {
             -Filter "cronet*.dll"
 
           if ($dlls.Count -eq 0) {
-            throw "Cronet DLL not found."
+            throw "Cronet DLL was not generated."
           }
 
           $dlls |
@@ -695,9 +501,6 @@ if (!is_android && !is_ios) {
             Select-Object FullName, Length |
             Format-Table -AutoSize
 
-      # ----------------------------------------------------------
-      # Prepare artifact
-      # ----------------------------------------------------------
       - name: Prepare Windows Artifact
         shell: powershell
         run: |
@@ -721,7 +524,10 @@ if (!is_android && !is_ios) {
             -File `
             -Filter "cronet*.dll" |
             ForEach-Object {
-              Copy-Item $_.FullName $dst -Force
+              Copy-Item `
+                $_.FullName `
+                $dst `
+                -Force
             }
 
           Get-ChildItem `
@@ -730,18 +536,16 @@ if (!is_android && !is_ios) {
             -File `
             -Filter "cronet*.lib" |
             ForEach-Object {
-              Copy-Item $_.FullName $dst -Force
+              Copy-Item `
+                $_.FullName `
+                $dst `
+                -Force
             }
-
-          Write-Host "===== Final artifact ====="
 
           Get-ChildItem $dst |
             Select-Object Name, Length |
             Format-Table -AutoSize
 
-      # ----------------------------------------------------------
-      # Upload
-      # ----------------------------------------------------------
       - name: Upload Windows Cronet
         uses: actions/upload-artifact@v4
         with:
