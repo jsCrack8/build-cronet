@@ -5,7 +5,7 @@ on:
 
 jobs:
   # =======================================================
-  # 任务 1：动态查询 Chromium 最新稳定版本 Tag
+  # 任务 1：动态获取 Chromium 最新稳定版本 Tag
   # =======================================================
   get-version:
     runs-on: ubuntu-latest
@@ -38,11 +38,18 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       # ---------------- Linux 环境初始化与磁盘清理 ----------------
-      - name: "Linux - 清理磁盘与安装基础依赖"
+      - name: "Linux - 清理磁盘并安装宿主编译库"
         if: matrix.os == 'ubuntu-latest'
         run: |
+          # 1. 深度清理无用大文件
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
           sudo docker image prune --all --force
+
+          # 2. 安装 Linux 编译基础组件
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libglib2.0-dev libnss3-dev libdbus-1-dev
+
+          # 3. 安装 depot_tools
           git clone --depth=1 https://chromium.googlesource.com/chromium/tools/depot_tools.git $HOME/depot_tools
           echo "$HOME/depot_tools" >> $GITHUB_PATH
 
@@ -77,19 +84,16 @@ jobs:
         if: matrix.os == 'windows-latest'
         shell: bash
         run: |
-          # 1. 消除 Git 提示与长路径配置
           git config --system core.longpaths true
           git config --global user.name "CronetBuilder"
           git config --global user.email "builder@local.host"
           git config --global core.autocrlf false
           git config --global depot-tools.allowGlobalGitConfig false
 
-          # 2. 安装 depot_tools
           curl -s -L -o depot_tools.zip https://storage.googleapis.com/chrome-infra/depot_tools.zip
           7z x depot_tools.zip -o"C:/depot_tools"
           echo "C:/depot_tools" >> $GITHUB_PATH
 
-          # 3. 环境变量设置（使用本地 VS 及 Windows SDK）
           echo "DEPOT_TOOLS_WIN_TOOLCHAIN=0" >> $GITHUB_ENV
           echo 'WINDOWSSDKDIR=C:\Program Files (x86)\Windows Kits\10' >> $GITHUB_ENV
 
@@ -118,7 +122,7 @@ jobs:
           git clone --depth 1 --branch "${{ needs.get-version.outputs.version }}" https://chromium.googlesource.com/chromium/src.git src
 
       # ---------------- 同步构建工具链 ----------------
-      - name: "同步构建工具链与依赖"
+      - name: "同步构建工具链与 Clang"
         shell: bash
         run: |
           cd $HOME/chromium
@@ -126,25 +130,28 @@ jobs:
 
           cd src
           if [ "${{ matrix.target_os }}" = "linux" ]; then
-            python3 build/linux/sysroot_scripts/install-sysroot.py --arch=amd64
             python3 tools/clang/scripts/update.py
           fi
           gclient runhooks
 
-      # ---------------- 生成 GN 配置并执行 Ninja 编译 ----------------
+      # ---------------- 生成 GN 配置并执行 Ninja 编译 (吸收 NaiveProxy 最佳实践) ----------------
       - name: "编译 Cronet"
         shell: bash
         run: |
           cd $HOME/chromium/src
 
-          if [ "${{ matrix.target_os }}" = "linux" ]; then
-            GN_ARGS='is_debug=false symbol_level=0 is_component_build=false target_os="linux" use_thin_lto=false use_sysroot=true'
-          else
-            # 自动探测当前系统物理存在的 Windows SDK 具体版本号，防止 setup_toolchain 猜错版本
-            WIN_SDK_VER=$(ls "C:/Program Files (x86)/Windows Kits/10/Include" | grep -E '^10\.' | sort -V | tail -n 1)
-            echo "==== 检测到已安装的 Windows SDK 版本: $WIN_SDK_VER ===="
+          # 通用防爆、防容错参数：
+          # 1. is_cronet_build=true: 彻底排除浏览器非网络组件（Blink/Printing/Media 等）
+          # 2. treat_warnings_as_errors=false / fatal_linker_warnings=false: 防止编译/链接警告中断构建
+          # 3. chrome_pgo_phase=0: 禁用 profile 优化避免寻找缺失文件
+          COMMON_ARGS='is_cronet_build=true is_debug=false symbol_level=0 is_component_build=false use_thin_lto=false treat_warnings_as_errors=false fatal_linker_warnings=false chrome_pgo_phase=0 enable_nacl=false'
 
-            GN_ARGS="is_debug=false symbol_level=0 is_component_build=false target_os=\"win\" use_thin_lto=false windows_sdk_version=\"$WIN_SDK_VER\""
+          if [ "${{ matrix.target_os }}" = "linux" ]; then
+            GN_ARGS="$COMMON_ARGS target_os=\"linux\" use_sysroot=false"
+          else
+            WIN_SDK_VER=$(ls "C:/Program Files (x86)/Windows Kits/10/Include" | grep -E '^10\.' | sort -V | tail -n 1)
+            echo "==== Windows SDK: $WIN_SDK_VER ===="
+            GN_ARGS="$COMMON_ARGS target_os=\"win\" windows_sdk_version=\"$WIN_SDK_VER\""
           fi
 
           echo "GN Args: $GN_ARGS"
