@@ -1,20 +1,5 @@
-name: Build Latest Chromium Cronet Linux x64
-
 on:
   workflow_dispatch:
-    inputs:
-      runner_label:
-        description: >-
-          REQUIRED: the label of a GitHub Larger Runner or self-hosted x86_64
-          Ubuntu runner with at least 150 GB SSD. Example: the custom label you
-          configured for a 4-core/16-GB/150-GB or 8-core/32-GB/300-GB runner.
-        required: true
-        type: string
-      min_free_gb:
-        description: Minimum free disk required before checkout/build
-        required: false
-        default: '110'
-        type: string
 
 permissions:
   contents: read
@@ -35,7 +20,9 @@ env:
 jobs:
   build-cronet:
     name: Chromium Cronet Linux x64
-    runs-on: ${{ inputs.runner_label }}
+    # Fixed large Ubuntu runner. Create a GitHub-hosted Larger Runner with
+    # this exact name/label: ubuntu-24.04-16core
+    runs-on: ubuntu-24.04-16core
     timeout-minutes: 1440
 
     defaults:
@@ -70,14 +57,7 @@ jobs:
             exit 1
           fi
 
-          MIN_FREE_GB="${{ inputs.min_free_gb }}"
-          case "${MIN_FREE_GB}" in
-            ''|*[!0-9]*)
-              echo "ERROR: min_free_gb must be an integer."
-              exit 1
-              ;;
-          esac
-
+          MIN_FREE_GB=110
           FREE_GB="$(df -Pk /home/runner | awk 'NR==2 {printf "%d", $4/1024/1024}')"
           echo "Free space on /home/runner: ${FREE_GB} GB"
           echo "Required free space: ${MIN_FREE_GB} GB"
@@ -90,13 +70,12 @@ jobs:
           100 GB free disk space, and a safety margin is used here.
 
           IMPORTANT:
-            Standard GitHub-hosted Ubuntu runners only provide about 14 GB SSD.
-            A GitHub Larger Runner or a self-hosted runner is required.
+            This workflow intentionally has no version or runner inputs.
+          It targets the fixed latest-stable Ubuntu larger-runner label:
+          ubuntu-24.04-16core.
 
-          Recommended GitHub Larger Runner sizes:
-            4 CPU / 16 GB RAM / 150 GB SSD  -> minimum practical option
-            8 CPU / 32 GB RAM / 300 GB SSD  -> recommended
-            16 CPU / 64 GB RAM / 600 GB SSD -> fastest among common sizes
+          That runner should be configured as an x64 Ubuntu 24.04 larger runner
+          with 16 cores, 64 GB RAM and 600 GB SSD.
           EOF
             exit 1
           fi
