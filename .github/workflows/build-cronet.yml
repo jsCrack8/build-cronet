@@ -1,0 +1,127 @@
+name: Build Cronet Multi-Platform
+
+on:
+  workflow_dispatch:
+
+jobs:
+  # 第一步：统一获取最新的稳定版本 Tag
+  get-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.tag }}
+    steps:
+      - id: version
+        run: |
+          VERSION=$(curl -s "https://chromiumdash.appspot.com/fetch_releases?channel=Stable&platform=Linux&num=1" | jq -r '.[0].version')
+          echo "tag=$VERSION" >> $GITHUB_OUTPUT
+          echo "Target Version: $VERSION"
+
+  # 第二步：矩阵并行编译 Windows 和 Linux
+  build:
+    needs: get-version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target_os: linux
+            artifact_name: cronet-linux-so
+            output_pattern: "out/Release/libcronet.so"
+          - os: windows-latest
+            target_os: win
+            artifact_name: cronet-windows-dll
+            output_pattern: "out/Release/cronet.dll*"
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      # ==================== Linux 环境清理与工具安装 ====================
+      - name: [Linux] 清理磁盘与安装依赖
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          sudo docker image prune --all --force
+          git clone --depth=1 https://chromium.googlesource.com/chromium/tools/depot_tools.git $HOME/depot_tools
+          echo "$HOME/depot_tools" >> $GITHUB_PATH
+
+      # ==================== Windows 环境准备与工具安装 ====================
+      - name: [Windows] 配置长路径与安装 depot_tools
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: |
+          git config --system core.longpaths true
+          # 下载 depot_tools 并解压
+          curl -s -L -o depot_tools.zip https://storage.googleapis.com/chrome-infra/depot_tools.zip
+          7z x depot_tools.zip -o"C:/depot_tools"
+          echo "C:/depot_tools" >> $GITHUB_PATH
+          # 告知 Chromium 使用本地预装的 Visual Studio / Windows SDK
+          echo "DEPOT_TOOLS_WIN_TOOLCHAIN=0" >> $GITHUB_ENV
+
+      # ==================== 统一：浅克隆 Chromium 源码 ====================
+      - name: 浅克隆指定版本 Chromium 源码
+        shell: bash
+        run: |
+          mkdir -p $HOME/chromium
+          cd $HOME/chromium
+
+          cat <<EOF > .gclient
+          solutions = [
+            {
+              "name": "src",
+              "url": "https://chromium.googlesource.com/chromium/src.git",
+              "managed": False,
+              "custom_deps": {},
+              "custom_vars": {
+                "checkout_nacl": False,
+                "checkout_pgo_profiles": False
+              },
+            },
+          ]
+          EOF
+
+          # 仅拉取目标版本
+          git clone --depth 1 --branch "${{ needs.get-version.outputs.version }}" https://chromium.googlesource.com/chromium/src.git src
+
+      # ==================== 统一：拉取必要工具链依赖 ====================
+      - name: 同步构建工具链与依赖
+        shell: bash
+        run: |
+          cd $HOME/chromium
+          gclient sync -D --no-history --shallow --nohooks
+
+          cd src
+          if [ "${{ matrix.target_os }}" = "linux" ]; then
+            build/linux/sysroot_scripts/install-sysroot.py --arch=x64
+            python3 tools/clang/scripts/update.py
+          fi
+          gclient runhooks
+
+      # ==================== 统一：生成 GN 配置并编译 ====================
+      - name: 编译 Cronet
+        shell: bash
+        run: |
+          cd $HOME/chromium/src
+
+          # 核心优化参数：禁用符号、关闭 ThinLTO、以 Release 模式单动态库编译
+          GN_ARGS='is_debug=false symbol_level=0 is_component_build=false target_os="${{ matrix.target_os }}" use_thin_lto=false'
+
+          gn gen out/Release --args="$GN_ARGS"
+          autoninja -C out/Release cronet
+
+      # ==================== 产物收集与上传 ====================
+      - name: 收集编译产物
+        shell: bash
+        run: |
+          mkdir -p $GITHUB_WORKSPACE/dist
+          cd $HOME/chromium/src
+          if [ "${{ matrix.target_os }}" = "linux" ]; then
+            cp out/Release/libcronet.so $GITHUB_WORKSPACE/dist/
+          else
+            cp out/Release/cronet.dll $GITHUB_WORKSPACE/dist/
+            cp out/Release/cronet.dll.lib $GITHUB_WORKSPACE/dist/ 2>/dev/null || true
+          fi
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}-${{ needs.get-version.outputs.version }}
+          path: ${{ github.workspace }}/dist/*
