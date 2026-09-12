@@ -1,178 +1,154 @@
-name: Build Cronet Multi-Platform
+name: Build Cronet (Win & Linux)
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: # 支持手动触发
+  push:
+    branches: [ main ]
 
 jobs:
-  # =======================================================
-  # 任务 1：动态获取 Chromium 最新稳定版本 Tag
-  # =======================================================
-  get-version:
-    runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.version.outputs.tag }}
+  # ==========================================
+  # Linux: 编译 libcronet.so
+  # ==========================================
+  build-linux:
+    runs-on: ubuntu-22.04
     steps:
-      - id: version
-        name: "查询 Chromium 最新版本号"
+      - name: Free Disk Space
         run: |
-          VERSION=$(curl -s "https://chromiumdash.appspot.com/fetch_releases?channel=Stable&platform=Linux&num=1" | jq -r '.[0].version')
-          echo "tag=$VERSION" >> $GITHUB_OUTPUT
-          echo "Target Version: $VERSION"
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf "/usr/local/share/boost"
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+          df -h
 
-  # =======================================================
-  # 任务 2：矩阵并发编译 Linux (.so) 与 Windows (.dll)
-  # =======================================================
-  build:
-    needs: get-version
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            target_os: linux
-            artifact_name: cronet-linux-so
-          - os: windows-latest
-            target_os: win
-            artifact_name: cronet-windows-dll
-
-    runs-on: ${{ matrix.os }}
-    steps:
-      # ---------------- Linux 环境初始化与磁盘清理 ----------------
-      - name: "Linux - 清理磁盘并安装宿主编译库"
-        if: matrix.os == 'ubuntu-latest'
+      - name: Install Dependencies
         run: |
-          # 1. 深度清理无用大文件
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
-          sudo docker image prune --all --force
-
-          # 2. 安装 Linux 编译基础组件
           sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config libglib2.0-dev libnss3-dev libdbus-1-dev
+          sudo apt-get install -y python3 python3-pip git curl build-essential libglib2.0-dev libnss3-dev libdbus-1-dev
 
-          # 3. 安装 depot_tools
-          git clone --depth=1 https://chromium.googlesource.com/chromium/tools/depot_tools.git $HOME/depot_tools
+      - name: Install depot_tools
+        run: |
+          git clone --depth 1 https://chromium.googlesource.com/chromium/tools/depot_tools.git $HOME/depot_tools
           echo "$HOME/depot_tools" >> $GITHUB_PATH
 
-      # ---------------- Windows 环境初始化与磁盘清理 ----------------
-      - name: "Windows - 深度清理磁盘释放空间 (腾出 30GB+)"
-        if: matrix.os == 'windows-latest'
-        shell: pwsh
+      - name: Fetch Chromium Source (Shallow & Latest only)
         run: |
-          Write-Host "=== 清理前 C 盘可用空间 ==="
-          Get-PSDrive C | Select-Object @{Name="Free Space (GB)"; Expression={[math]::round($_.Free/1GB,2)}}
-
-          $targets = @(
-            "C:\Program Files (x86)\Android",
-            "C:\hostedtoolcache\windows\Ruby",
-            "C:\hostedtoolcache\windows\Java",
-            "C:\hostedtoolcache\windows\go",
-            "C:\hostedtoolcache\windows\CodeQL",
-            "C:\Program Files\dotnet"
-          )
-
-          foreach ($path in $targets) {
-            if (Test-Path $path) {
-              Write-Host "正在清理: $path ..."
-              Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $path
-            }
-          }
-
-          Write-Host "=== 清理后 C 盘可用空间 ==="
-          Get-PSDrive C | Select-Object @{Name="Free Space (GB)"; Expression={[math]::round($_.Free/1GB,2)}}
-
-      - name: "Windows - 配置长路径、Git 与 depot_tools"
-        if: matrix.os == 'windows-latest'
-        shell: bash
-        run: |
-          git config --system core.longpaths true
-          git config --global user.name "CronetBuilder"
-          git config --global user.email "builder@local.host"
-          git config --global core.autocrlf false
-          git config --global depot-tools.allowGlobalGitConfig false
-
-          curl -s -L -o depot_tools.zip https://storage.googleapis.com/chrome-infra/depot_tools.zip
-          7z x depot_tools.zip -o"C:/depot_tools"
-          echo "C:/depot_tools" >> $GITHUB_PATH
-
-          echo "DEPOT_TOOLS_WIN_TOOLCHAIN=0" >> $GITHUB_ENV
-          echo 'WINDOWSSDKDIR=C:\Program Files (x86)\Windows Kits\10' >> $GITHUB_ENV
-
-      # ---------------- 浅克隆指定版本源码 (双平台通用) ----------------
-      - name: "拉取指定版本 Chromium 源码 (Shallow Clone)"
-        shell: bash
-        run: |
-          mkdir -p $HOME/chromium
-          cd $HOME/chromium
-
-          cat <<EOF > .gclient
+          export PATH="$HOME/depot_tools:$PATH"
+          mkdir -p chromium && cd chromium
+          
+          # 创建不包含历史版本的 gclient 配置
+          cat << 'EOF' > .gclient
           solutions = [
             {
               "name": "src",
               "url": "https://chromium.googlesource.com/chromium/src.git",
+              "deps_file": "DEPS",
               "managed": False,
               "custom_deps": {},
-              "custom_vars": {
-                "checkout_nacl": False,
-                "checkout_pgo_profiles": False
-              },
+              "custom_vars": {},
             },
           ]
           EOF
 
-          git clone --depth 1 --branch "${{ needs.get-version.outputs.version }}" https://chromium.googlesource.com/chromium/src.git src
-
-      # ---------------- 同步构建工具链 ----------------
-      - name: "同步构建工具链与 Clang"
-        shell: bash
-        run: |
-          cd $HOME/chromium
-          gclient sync -D --no-history --shallow --nohooks
+          # --no-history 和 --shallow-submodules 极大减少下载量与历史记录
+          gclient sync --no-history --shallow --nohooks -j 8
 
           cd src
-          if [ "${{ matrix.target_os }}" = "linux" ]; then
-            python3 tools/clang/scripts/update.py
-          fi
+          # 安装系统依赖并执行环境 hooks
+          build/install-build-deps.sh --no-prompt --no-chromeos-fonts
           gclient runhooks
 
-      # ---------------- 生成 GN 配置并执行 Ninja 编译 (吸收 NaiveProxy 最佳实践) ----------------
-      - name: "编译 Cronet"
-        shell: bash
+      - name: GN Gen & Build Cronet (.so)
         run: |
-          cd $HOME/chromium/src
+          export PATH="$HOME/depot_tools:$PATH"
+          cd chromium/src
+          
+          mkdir -p out/Release
+          # 仅编译必要的 cronet 产物，关闭测试与非必要模块以节省时间和空间
+          cat << 'EOF' > out/Release/args.gn
+          is_component_build = false
+          is_debug = false
+          symbol_level = 0
+          use_custom_libcxx = true
+          treat_warnings_as_errors = false
+          EOF
 
-          # 通用防爆、防容错参数：
-          # 1. is_cronet_build=true: 彻底排除浏览器非网络组件（Blink/Printing/Media 等）
-          # 2. treat_warnings_as_errors=false / fatal_linker_warnings=false: 防止编译/链接警告中断构建
-          # 3. chrome_pgo_phase=0: 禁用 profile 优化避免寻找缺失文件
-          COMMON_ARGS='is_cronet_build=true is_debug=false symbol_level=0 is_component_build=false use_thin_lto=false treat_warnings_as_errors=false fatal_linker_warnings=false chrome_pgo_phase=0 enable_nacl=false'
+          gn gen out/Release
+          # 仅编译 cronet
+          ninja -C out/Release cronet
 
-          if [ "${{ matrix.target_os }}" = "linux" ]; then
-            GN_ARGS="$COMMON_ARGS target_os=\"linux\" use_sysroot=false"
-          else
-            WIN_SDK_VER=$(ls "C:/Program Files (x86)/Windows Kits/10/Include" | grep -E '^10\.' | sort -V | tail -n 1)
-            echo "==== Windows SDK: $WIN_SDK_VER ===="
-            GN_ARGS="$COMMON_ARGS target_os=\"win\" windows_sdk_version=\"$WIN_SDK_VER\""
-          fi
-
-          echo "GN Args: $GN_ARGS"
-          gn gen out/Release --args="$GN_ARGS"
-          autoninja -C out/Release cronet
-
-      # ---------------- 收集并上传产物 ----------------
-      - name: "收集构建产物"
-        shell: bash
-        run: |
-          mkdir -p $GITHUB_WORKSPACE/dist
-          cd $HOME/chromium/src
-          if [ "${{ matrix.target_os }}" = "linux" ]; then
-            cp out/Release/libcronet.so $GITHUB_WORKSPACE/dist/
-          else
-            cp out/Release/cronet.dll $GITHUB_WORKSPACE/dist/
-            cp out/Release/cronet*.lib $GITHUB_WORKSPACE/dist/ 2>/dev/null || true
-          fi
-
-      - name: "上传 Artifact 压缩包"
+      - name: Upload Linux Cronet (.so)
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact_name }}-${{ needs.get-version.outputs.version }}
-          path: ${{ github.workspace }}/dist/*
+          name: cronet-linux
+          path: chromium/src/out/Release/libcronet.*.so
+
+
+  # ==========================================
+  # Windows: 编译 cronet.dll
+  # ==========================================
+  build-windows:
+    runs-on: windows-2022
+    steps:
+      - name: Configure Git
+        shell: bash
+        run: |
+          git config --system core.longpaths true
+
+      - name: Install depot_tools
+        shell: bash
+        run: |
+          git clone --depth 1 https://chromium.googlesource.com/chromium/tools/depot_tools.git /c/depot_tools
+          # depot_tools 必须在 PATH 最前端
+          echo "C:/depot_tools" >> $GITHUB_PATH
+          echo "DEPOT_TOOLS_WIN_TOOLCHAIN=0" >> $GITHUB_ENV
+
+      - name: Fetch Chromium Source (Shallow & Latest only)
+        shell: bash
+        run: |
+          export PATH="/c/depot_tools:$PATH"
+          mkdir -p /c/chromium && cd /c/chromium
+
+          cat << 'EOF' > .gclient
+          solutions = [
+            {
+              "name": "src",
+              "url": "https://chromium.googlesource.com/chromium/src.git",
+              "deps_file": "DEPS",
+              "managed": False,
+              "custom_deps": {},
+              "custom_vars": {},
+            },
+          ]
+          EOF
+
+          # 仅拉取最新 commit，不拉取历史
+          gclient sync --no-history --shallow --nohooks -j 8
+          cd src
+          gclient runhooks
+
+      - name: GN Gen & Build Cronet (.dll)
+        shell: bash
+        run: |
+          export PATH="/c/depot_tools:$PATH"
+          cd /c/chromium/src
+
+          mkdir -p out/Release
+          cat << 'EOF' > out/Release/args.gn
+          is_component_build = false
+          is_debug = false
+          symbol_level = 0
+          treat_warnings_as_errors = false
+          EOF
+
+          gn gen out/Release
+          # 仅编译 cronet
+          ninja -C out/Release cronet
+
+      - name: Upload Windows Cronet (.dll)
+        uses: actions/upload-artifact@v4
+        with:
+          name: cronet-windows
+          path: |
+            C:/chromium/src/out/Release/cronet.dll
+            C:/chromium/src/out/Release/cronet.dll.lib
