@@ -5,408 +5,108 @@ on:
   schedule:
     - cron: '0 2 * * *'
 
-
 permissions:
   contents: read
 
-
 jobs:
-
   windows-x64:
-
     name: Windows x64 Cronet
-
     runs-on: windows-2022
-
     timeout-minutes: 360
 
-
     env:
-
       DEPOT_TOOLS: C:\depot_tools
-
       CHROMIUM_ROOT: C:\chromium
-
       CHROMIUM_SRC: C:\chromium\src
-
       OUT_DIR: C:\chromium\src\out\Cronet
-
       GIT_TERMINAL_PROMPT: '0'
-
       DEPOT_TOOLS_UPDATE: '1'
-
       DEPOT_TOOLS_WIN_TOOLCHAIN: '0'
-
       GYP_MSVS_VERSION: '2022'
 
-      DEPOT_TOOLS_WIN_TOOLCHAIN_VERSION: '2022'
-
-
-
     steps:
+      - name: Install depot_tools
+        shell: pwsh
+        run: |
+          git clone --depth=1 https://chromium.googlesource.com/chromium/tools/depot_tools.git $env:DEPOT_TOOLS
+          echo $env:DEPOT_TOOLS >> $env:GITHUB_PATH
 
+      - name: Setup Visual Studio and SDK
+        shell: pwsh
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (!$vs) { throw "VS2022 not found" }
 
-    - name: Show runner information
-      shell: pwsh
-      run: |
+          cmd /c "`"$vs\Common7\Tools\VsDevCmd.bat`" -arch=x64 && set" > vsenv.txt
 
-        systeminfo
-
-        Get-PSDrive C
-
-
-
-    #
-    # 清理空间
-    #
-    - name: Free disk space
-      shell: pwsh
-      run: |
-
-        $paths=@(
-        "C:\Android",
-        "C:\Program Files\Android",
-        "C:\hostedtoolcache\windows\Ruby",
-        "C:\hostedtoolcache\windows\Java*",
-        "C:\hostedtoolcache\windows\go",
-        "C:\hostedtoolcache\windows\Python",
-        "C:\hostedtoolcache\windows\CodeQL",
-        "C:\Program Files\dotnet"
-        )
-
-
-        foreach($p in $paths){
-
-          if(Test-Path $p){
-
-             Remove-Item $p -Recurse -Force -ErrorAction SilentlyContinue
-
+          Get-Content vsenv.txt | ForEach-Object {
+            if ($_ -match "^(.*?)=(.*)$") {
+              Set-Item "env:$($matches[1])" $matches[2]
+            }
           }
 
-        }
-
-
-        Get-PSDrive C
-
-
-
-    #
-    # 安装 depot tools
-    #
-    - name: Install depot_tools
-
-      shell: pwsh
-
-      run: |
-
-
-        git clone --depth=1 `
-        https://chromium.googlesource.com/chromium/tools/depot_tools.git `
-        $env:DEPOT_TOOLS
-
-
-        echo $env:DEPOT_TOOLS >> $env:GITHUB_PATH
-
-
-        $env:PATH="$env:DEPOT_TOOLS;$env:PATH"
-
-
-        gclient.bat metrics --enable
-
-        gclient.bat help
-
-
-
-
-    #
-    # 修复 VS + Windows SDK 环境
-    #
-    - name: Setup Visual Studio Environment
-
-      shell: pwsh
-
-      run: |
-
-
-        Write-Host "Finding Visual Studio"
-
-
-        $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" `
-          -latest `
-          -products * `
-          -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
-          -property installationPath
-
-
-
-        Write-Host "VS=$vs"
-
-
-
-        if(!$vs){
-
-          throw "Visual Studio not found"
-
-        }
-
-
-
-        cmd /c "`"$vs\Common7\Tools\VsDevCmd.bat`" -arch=x64 && set" > vsenv.txt
-
-
-
-        Get-Content vsenv.txt | ForEach-Object {
-
-
-          if($_ -match "^(.*?)=(.*)$"){
-
-             set-item `
-             -Path "env:$($matches[1])" `
-             -Value "$($matches[2])"
-
-          }
-
-        }
-
-
-
-        #
-        # 清除错误 SDK
-        #
-
-        Remove-Item Env:INCLUDE -ErrorAction SilentlyContinue
-
-        Remove-Item Env:LIB -ErrorAction SilentlyContinue
-
-
-
-        Write-Host "Windows SDK"
-
-        dir "C:\Program Files (x86)\Windows Kits\10\Include"
-
-
-
-    #
-    # 拉 Chromium
-    #
-    - name: Checkout Chromium
-
-      shell: cmd
-
-      run: |
-
-
-        set PATH=%DEPOT_TOOLS%;%PATH%
-
-
-        if not exist "%CHROMIUM_ROOT%" mkdir "%CHROMIUM_ROOT%"
-
-
-        cd /d "%CHROMIUM_ROOT%"
-
-
-        call fetch.bat --nohooks --no-history chromium
-
-
-
-        cd /d "%CHROMIUM_SRC%"
-
-
-        git rev-parse HEAD > C:\chromium_revision.txt
-
-        type chrome\VERSION > C:\chromium_version.txt
-
-
-
-
-    #
-    # hooks
-    #
-    - name: Chromium hooks
-
-      shell: cmd
-
-      run: |
-
-
-        set PATH=%DEPOT_TOOLS%;%PATH%
-
-        cd /d "%CHROMIUM_SRC%"
-
-        call gclient.bat runhooks
-
-
-
-
-    #
-    # GN args
-    #
-    - name: Generate GN args
-
-      shell: pwsh
-
-      run: |
-
-
-        New-Item `
-        -ItemType Directory `
-        -Force `
-        "$env:OUT_DIR"
-
-
-
-        @'
-
-target_cpu="x64"
-
-is_debug=false
-
-is_component_build=false
-
-is_official_build=false
-
-
-symbol_level=0
-
-blink_symbol_level=0
-
-v8_symbol_level=0
-
-
-dcheck_always_on=false
-
-
-enable_nacl=false
-
-
-use_thin_lto=false
-
-chrome_pgo_phase=0
-
-
-use_goma=false
-
-use_remoteexec=false
-
-
-visual_studio_path="C:/Program Files/Microsoft Visual Studio/2022/Enterprise"
-
-
-win_sdk_version="10.0.26100.0"
-
-'@ | Out-File `
-"$env:OUT_DIR\args.gn" `
--Encoding utf8
-
-
-
-        cat "$env:OUT_DIR\args.gn"
-
-
-
-
-    #
-    # GN generate
-    #
-    - name: GN generate
-
-      shell: cmd
-
-      run: |
-
-
-        set PATH=%DEPOT_TOOLS%;%PATH%
-
-
-        cd /d "%CHROMIUM_SRC%"
-
-
-        call gn.bat gen "%OUT_DIR%"
-
-
-        call gn.bat desc "%OUT_DIR%" //components/cronet:cronet > C:\gn_cronet_desc.txt
-
-
-
-
-    #
-    # Build
-    #
-    - name: Build Cronet DLL
-
-      shell: cmd
-
-      run: |
-
-
-        set PATH=%DEPOT_TOOLS%;%PATH%
-
-
-        cd /d "%CHROMIUM_SRC%"
-
-
-        call autoninja.bat ^
-        -C "%OUT_DIR%" ^
-        //components/cronet:cronet
-
-
-
-
-    #
-    # Package
-    #
-    - name: Package
-
-      shell: pwsh
-
-      run: |
-
-
-        $out="C:\cronet-artifact"
-
-
-        mkdir "$out\bin" -Force
-
-        mkdir "$out\include" -Force
-
-        mkdir "$out\lib" -Force
-
-
-
-        Copy-Item `
-        "$env:OUT_DIR\cronet.dll" `
-        "$out\bin"
-
-
-
-        Copy-Item `
-        "$env:CHROMIUM_SRC\components\cronet\native\include\*.h" `
-        "$out\include"
-
-
-
-        git -C $env:CHROMIUM_SRC rev-parse HEAD `
-        | Out-File "$out\build-info.txt"
-
-
-
-        Get-FileHash `
-        "$out\bin\cronet.dll" `
-        -Algorithm SHA256 `
-        | Out-File "$out\SHA256SUMS.txt"
-
-
-
-    - name: Upload Artifact
-
-      uses: actions/upload-artifact@v4
-
-      with:
-
-        name: cronet-windows-x64-latest
-
-        path: C:\cronet-artifact
-
-        compression-level: 0
-
-        retention-days: 7
+          Remove-Item Env:INCLUDE -ErrorAction SilentlyContinue
+          Remove-Item Env:LIB -ErrorAction SilentlyContinue
+
+      - name: Checkout Chromium
+        shell: cmd
+        run: |
+          set PATH=%DEPOT_TOOLS%;%PATH%
+          mkdir C:\chromium
+          cd /d C:\chromium
+          call fetch.bat --nohooks --no-history chromium
+
+      - name: Run hooks
+        shell: cmd
+        run: |
+          set PATH=%DEPOT_TOOLS%;%PATH%
+          cd /d %CHROMIUM_SRC%
+          call gclient.bat runhooks
+
+      - name: Generate GN args
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force $env:OUT_DIR | Out-Null
+          @'
+target_cpu = "x64"
+is_debug = false
+is_component_build = false
+symbol_level = 0
+blink_symbol_level = 0
+v8_symbol_level = 0
+use_thin_lto = false
+chrome_pgo_phase = 0
+visual_studio_path = "C:/Program Files/Microsoft Visual Studio/2022/Enterprise"
+win_sdk_version = "10.0.26100.0"
+'@ | Out-File "$env:OUT_DIR\args.gn" -Encoding utf8
+
+      - name: GN generate
+        shell: cmd
+        run: |
+          set PATH=%DEPOT_TOOLS%;%PATH%
+          cd /d %CHROMIUM_SRC%
+          call gn.bat gen "%OUT_DIR%"
+          call gn.bat desc "%OUT_DIR%" //components/cronet:cronet > C:\gn_cronet_desc.txt
+
+      - name: Build Cronet
+        shell: cmd
+        run: |
+          set PATH=%DEPOT_TOOLS%;%PATH%
+          cd /d %CHROMIUM_SRC%
+          call autoninja.bat -C "%OUT_DIR%" //components/cronet:cronet
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $out="C:\cronet-artifact"
+          New-Item "$out\bin" -Force -ItemType Directory | Out-Null
+          Copy-Item "$env:OUT_DIR\cronet.dll" "$out\bin\"
+          Copy-Item "$env:CHROMIUM_SRC\components\cronet\native\include\*.h" "$out\"
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: cronet-windows-x64-latest
+          path: C:\cronet-artifact
+          compression-level: 0
+          retention-days: 7
