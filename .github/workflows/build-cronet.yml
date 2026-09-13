@@ -138,27 +138,25 @@ jobs:
           rm -rf "$OUT_DIR"
           mkdir -p "$OUT_DIR"
 
-          cat > "$OUT_DIR/args.gn" <<'EOF_GN'
-          target_cpu = "x64"
-          current_cpu = "x64"
-
-          is_debug = false
-          is_component_build = false
-          is_official_build = false
-          is_cronet_build = true
-
-          # Disable Chrome's PGO profile lookup because --no-history does not
-          # checkout the optional profile files.
-          chrome_pgo_phase = 0
-
-          symbol_level = 0
-          blink_symbol_level = 0
-          v8_symbol_level = 0
-
-          dcheck_always_on = false
-          EOF_GN
-
-          sed -i 's/^[[:space:]]\{10\}//' "$OUT_DIR/args.gn"
+          printf '%s\n' \
+            'target_cpu = "x64"' \
+            'current_cpu = "x64"' \
+            '' \
+            'is_debug = false' \
+            'is_component_build = false' \
+            'is_official_build = false' \
+            'is_cronet_build = true' \
+            '' \
+            '# Disable Chrome'"'"'s PGO profile lookup because --no-history does not' \
+            '# checkout the optional profile files.' \
+            'chrome_pgo_phase = 0' \
+            '' \
+            'symbol_level = 0' \
+            'blink_symbol_level = 0' \
+            'v8_symbol_level = 0' \
+            '' \
+            'dcheck_always_on = false' \
+            > "$OUT_DIR/args.gn"
 
           GN="$CHROMIUM_SRC/buildtools/linux64/gn"
           test -x "$GN"
