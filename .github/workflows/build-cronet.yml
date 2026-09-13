@@ -1,202 +1,235 @@
-name: Build Latest Chromium Cronet Windows x64
+name: Build Latest Chromium Cronet Linux x64
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "0 2 * * *"
 
 permissions:
   contents: read
 
+concurrency:
+  group: build-latest-cronet-linux-x64
+  cancel-in-progress: true
+
+env:
+  DEPOT_TOOLS: /home/runner/depot_tools
+  CHROMIUM_ROOT: /home/runner/chromium
+  CHROMIUM_SRC: /home/runner/chromium/src
+  OUT_DIR: /home/runner/chromium/src/out/Cronet
+
 jobs:
-  windows-x64:
-    name: Windows x64 Cronet
-    runs-on: windows-2022
+  linux-x64:
+    name: Build Chromium Cronet Linux x64
+    runs-on: ubuntu-latest
     timeout-minutes: 360
 
-    env:
-      DEPOT_TOOLS: 'C:\depot_tools'
-      CHROMIUM_ROOT: 'C:\chromium'
-      CHROMIUM_SRC: 'C:\chromium\src'
-      OUT_DIR: 'C:\chromium\src\out\Cronet'
-      DEPOT_TOOLS_WIN_TOOLCHAIN: '0'
-      GYP_MSVS_VERSION: '2022'
-      GIT_TERMINAL_PROMPT: '0'
-
     steps:
-
       - name: Show runner information
-        shell: pwsh
+        shell: bash
         run: |
-          Get-ComputerInfo | Select-Object WindowsProductName, WindowsVersion
-          Get-PSDrive C
+          set -euxo pipefail
+          uname -a
+          arch
+          nproc
+          free -h
+          df -h /
+          python3 --version
+          git --version
 
-      - name: Free disk space
-        shell: pwsh
+      - name: Install basic host packages
+        shell: bash
         run: |
-          $paths = @(
-            "C:\Android",
-            "C:\Program Files\Android",
-            "C:\hostedtoolcache\windows\CodeQL",
-            "C:\Program Files\dotnet"
-          )
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            ca-certificates \
+            curl \
+            file \
+            git \
+            git-lfs \
+            lsb-release \
+            ninja-build \
+            pkg-config \
+            python3 \
+            rsync \
+            unzip \
+            zip
 
-          foreach ($p in $paths) {
-            if (Test-Path $p) {
-              Remove-Item $p -Recurse -Force -ErrorAction SilentlyContinue
-            }
-          }
-
-      - name: Install depot_tools
-        shell: pwsh
+      - name: Install latest depot_tools and bootstrap
+        shell: bash
         run: |
-          git clone --depth=1 https://chromium.googlesource.com/chromium/tools/depot_tools.git C:\depot_tools
-          Add-Content $env:GITHUB_PATH C:\depot_tools
+          set -euxo pipefail
 
-      - name: Detect Visual Studio and Windows SDK
-        shell: pwsh
+          rm -rf "$DEPOT_TOOLS"
+          git clone --depth=1 \
+            https://chromium.googlesource.com/chromium/tools/depot_tools.git \
+            "$DEPOT_TOOLS"
+
+          export PATH="$DEPOT_TOOLS:$PATH"
+
+          cd "$DEPOT_TOOLS"
+          ./ensure_bootstrap
+
+          test -f "$DEPOT_TOOLS/python3_bin_reldir.txt"
+
+          command -v gclient
+          command -v fetch
+          command -v autoninja
+
+          gclient --version || true
+
+      - name: Install Chromium build dependencies
+        shell: bash
         run: |
+          set -euxo pipefail
 
-          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" `
-            -latest `
-            -products * `
-            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
-            -property installationPath
+          rm -rf /tmp/chromium-deps
+          git clone --depth=1 \
+            https://chromium.googlesource.com/chromium/src.git \
+            /tmp/chromium-deps
 
-          if (-not $vs) {
-            throw "Visual Studio 2022 not found"
-          }
+          cd /tmp/chromium-deps
 
-          $sdkRoot = "C:\Program Files (x86)\Windows Kits\10"
+          sudo ./build/install-build-deps.sh \
+            --no-prompt \
+            --no-chromeos-fonts \
+            --no-nacl
 
-          $sdkInclude = Join-Path $sdkRoot "Include"
+          rm -rf /tmp/chromium-deps
 
-          if (!(Test-Path $sdkInclude)) {
-            throw "Windows SDK Include directory missing"
-          }
-
-          $sdk = Get-ChildItem $sdkInclude -Directory |
-            Where-Object { $_.Name -match "^10\." } |
-            Sort-Object Name -Descending |
-            Select-Object -First 1
-
-          if (-not $sdk) {
-            throw "No Windows SDK version found"
-          }
-
-          $version = $sdk.Name
-
-          if (!(Test-Path "$sdkInclude\$version\um")) {
-            throw "SDK um folder missing: $version"
-          }
-
-          if (!(Test-Path "$sdkInclude\$version\shared")) {
-            throw "SDK shared folder missing: $version"
-          }
-
-          Write-Host "VS=$vs"
-          Write-Host "SDK=$version"
-
-          "VS_PATH=$vs" >> $env:GITHUB_ENV
-          "WINDOWS_SDK_VERSION=$version" >> $env:GITHUB_ENV
-          "WindowsSdkDir=$sdkRoot\" >> $env:GITHUB_ENV
-          "WindowsSDKVersion=$version\" >> $env:GITHUB_ENV
-
-      - name: Checkout Chromium
-        shell: cmd
+      - name: Checkout latest Chromium main without Git history
+        shell: bash
         run: |
-          set PATH=C:\depot_tools;%PATH%
+          set -euxo pipefail
+          export PATH="$DEPOT_TOOLS:$PATH"
 
-          if not exist C:\chromium mkdir C:\chromium
+          rm -rf "$CHROMIUM_ROOT"
+          mkdir -p "$CHROMIUM_ROOT"
+          cd "$CHROMIUM_ROOT"
 
-          cd /d C:\chromium
+          fetch --nohooks --no-history chromium
 
-          call fetch.bat --nohooks --no-history chromium
+          cd "$CHROMIUM_SRC"
+          echo "Chromium revision:"
+          git rev-parse HEAD | tee /home/runner/chromium_revision.txt
 
-      - name: Run Chromium hooks
-        shell: cmd
+          echo "Chromium version:"
+          cat chrome/VERSION | tee /home/runner/chromium_version.txt
+
+      - name: Sync dependencies and run hooks
+        shell: bash
         run: |
-          set PATH=C:\depot_tools;%PATH%
+          set -euxo pipefail
+          export PATH="$DEPOT_TOOLS:$PATH"
+          cd "$CHROMIUM_SRC"
 
-          cd /d C:\chromium\src
+          gclient sync -D --force --reset --no-history
+          gclient runhooks
 
-          call gclient.bat runhooks
+          test -x "$CHROMIUM_SRC/buildtools/linux64/gn"
+          test -x "$DEPOT_TOOLS/autoninja"
 
-      - name: Generate args.gn
-        shell: pwsh
+      - name: Configure Linux x64 Cronet with GN
+        shell: bash
         run: |
+          set -euxo pipefail
+          cd "$CHROMIUM_SRC"
 
-          New-Item -ItemType Directory -Force "$env:OUT_DIR" | Out-Null
+          rm -rf "$OUT_DIR"
+          mkdir -p "$OUT_DIR"
 
-          @(
-            'target_cpu = "x64"',
-            'host_cpu = "x64"',
-            'is_debug = false',
-            'is_component_build = false',
-            'is_official_build = false',
-            'symbol_level = 0',
-            'blink_symbol_level = 0',
-            'v8_symbol_level = 0',
-            'use_thin_lto = false',
-            'chrome_pgo_phase = 0',
-            'enable_nacl = false'
-          ) | Out-File "$env:OUT_DIR\args.gn" -Encoding utf8
+          cat > "$OUT_DIR/args.gn" <<'EOF_GN'
+          target_cpu = "x64"
+          current_cpu = "x64"
 
-      - name: GN generate with detected SDK
-        shell: cmd
+          is_debug = false
+          is_component_build = false
+          is_official_build = true
+          is_cronet_build = true
+
+          # Disable Chrome's PGO profile lookup because --no-history does not
+          # checkout the optional profile files.
+          chrome_pgo_phase = 0
+
+          symbol_level = 0
+          blink_symbol_level = 0
+          v8_symbol_level = 0
+
+          dcheck_always_on = false
+          EOF_GN
+
+          sed -i 's/^[[:space:]]\{10\}//' "$OUT_DIR/args.gn"
+
+          GN="$CHROMIUM_SRC/buildtools/linux64/gn"
+          test -x "$GN"
+
+          echo '=== args.gn ==='
+          cat "$OUT_DIR/args.gn"
+
+          "$GN" gen "$OUT_DIR"
+      - name: Build only Cronet shared library
+        shell: bash
         run: |
+          set -euxo pipefail
+          export PATH="$DEPOT_TOOLS:$PATH"
+          cd "$CHROMIUM_SRC"
 
-          set PATH=C:\depot_tools;%PATH%
+          # Match the local successful build command.
+          autoninja -C "$OUT_DIR" cronet
 
-          set INCLUDE=
-          set LIB=
-          set LIBPATH=
-
-          call "%VS_PATH%\Common7\Tools\VsDevCmd.bat" -arch=x64
-
-          set WindowsSdkDir=C:\Program Files (x86)\Windows Kits\10\
-          set WindowsSDKVersion=%WINDOWS_SDK_VERSION%\
-
-          echo ==== SDK ====
-          echo %WindowsSDKVersion%
-
-          echo ==== INCLUDE ====
-          echo %INCLUDE%
-
-          cd /d C:\chromium\src
-
-          call gn.bat gen "%OUT_DIR%"
-
-      - name: Build Cronet
-        shell: cmd
+      - name: Locate and validate Cronet Linux x64 library
+        shell: bash
         run: |
+          set -euxo pipefail
+          cd "$CHROMIUM_SRC"
 
-          set PATH=C:\depot_tools;%PATH%
+          mkdir -p /home/runner/cronet-artifact
 
-          cd /d C:\chromium\src
+          found="$(find "$OUT_DIR" -type f \( -name 'libcronet.so' -o -name 'libcronet.*.so' -o -name 'cronet.*.so' \) -print | head -n 1 || true)"
 
-          call autoninja.bat -C "%OUT_DIR%" //components/cronet:cronet
+          if [[ -z "$found" ]]; then
+            echo 'ERROR: No Cronet shared library was produced.'
+            echo 'All shared libraries under the output directory:'
+            find "$OUT_DIR" -type f -name '*.so' -print | head -200 || true
+            exit 1
+          fi
 
-      - name: Package Cronet
-        shell: pwsh
-        run: |
+          echo "Found: $found"
+          cp -L "$found" /home/runner/cronet-artifact/libcronet.so
 
-          $out = "C:\cronet-artifact"
+          file /home/runner/cronet-artifact/libcronet.so
+          readelf -h /home/runner/cronet-artifact/libcronet.so
 
-          New-Item -ItemType Directory -Force "$out\bin" | Out-Null
+          file /home/runner/cronet-artifact/libcronet.so | grep -Eq 'ELF 64-bit.*x86-64'
 
-          if (!(Test-Path "$env:OUT_DIR\cronet.dll")) {
-            throw "cronet.dll not found"
-          }
+          sha256sum /home/runner/cronet-artifact/libcronet.so \
+            | tee /home/runner/cronet-artifact/SHA256SUMS.txt
 
-          Copy-Item "$env:OUT_DIR\cronet.dll" "$out\bin\"
-
-          Copy-Item "$env:CHROMIUM_SRC\components\cronet\native\include\*.h" "$out" -ErrorAction SilentlyContinue
+          {
+            echo "Chromium revision: $(git -C "$CHROMIUM_SRC" rev-parse HEAD)"
+            echo "Chromium version: $(tr '\n' ' ' < "$CHROMIUM_SRC/chrome/VERSION")"
+            echo "Runner: ubuntu-latest"
+            echo "Architecture: x86_64"
+            echo "GN target: //components/cronet:cronet"
+            echo "Source library: $found"
+          } > /home/runner/cronet-artifact/build-info.txt
 
       - name: Upload Cronet artifact
         uses: actions/upload-artifact@v4
         with:
-          name: cronet-windows-x64-latest
-          path: C:\cronet-artifact
+          name: cronet-linux-x64-latest
+          path: /home/runner/cronet-artifact
+          if-no-files-found: error
           compression-level: 0
+          retention-days: 7
+
+      - name: Upload build metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: cronet-linux-x64-build-metadata
+          path: |
+            /home/runner/chromium_revision.txt
+            /home/runner/chromium_version.txt
+            /home/runner/cronet_target_desc.txt
+          if-no-files-found: warn
           retention-days: 7
