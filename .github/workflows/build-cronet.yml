@@ -19,9 +19,9 @@ jobs:
       CHROMIUM_ROOT: 'C:\chromium'
       CHROMIUM_SRC: 'C:\chromium\src'
       OUT_DIR: 'C:\chromium\src\out\Cronet'
-      GIT_TERMINAL_PROMPT: '0'
       DEPOT_TOOLS_WIN_TOOLCHAIN: '0'
       GYP_MSVS_VERSION: '2022'
+      GIT_TERMINAL_PROMPT: '0'
 
     steps:
       - name: Install depot_tools
@@ -30,27 +30,11 @@ jobs:
           git clone --depth=1 https://chromium.googlesource.com/chromium/tools/depot_tools.git C:\depot_tools
           Add-Content $env:GITHUB_PATH C:\depot_tools
 
-      - name: Detect Windows SDK
-        shell: pwsh
-        run: |
-          $sdk = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\Include' -Directory |
-            Where-Object { $_.Name -match '^10\.' } |
-            Sort-Object Name -Descending |
-            Select-Object -First 1
-
-          if (-not $sdk) {
-            throw 'Windows SDK not found'
-          }
-
-          "WINDOWS_SDK_VERSION=$($sdk.Name)" >> $env:GITHUB_ENV
-
-          Write-Host "SDK=$($sdk.Name)"
-
       - name: Checkout Chromium
         shell: cmd
         run: |
           set PATH=C:\depot_tools;%PATH%
-          mkdir C:\chromium
+          if not exist C:\chromium mkdir C:\chromium
           cd /d C:\chromium
           call fetch.bat --nohooks --no-history chromium
 
@@ -67,9 +51,12 @@ jobs:
           New-Item -ItemType Directory -Force "$env:OUT_DIR" | Out-Null
           @(
             'target_cpu = "x64"',
+            'host_cpu = "x64"',
             'is_debug = false',
             'is_component_build = false',
             'symbol_level = 0',
+            'blink_symbol_level = 0',
+            'v8_symbol_level = 0',
             'use_thin_lto = false',
             'chrome_pgo_phase = 0'
           ) | Out-File "$env:OUT_DIR\args.gn" -Encoding utf8
@@ -78,6 +65,13 @@ jobs:
         shell: cmd
         run: |
           set PATH=C:\depot_tools;%PATH%
+          set INCLUDE=
+          set LIB=
+          set LIBPATH=
+          set WindowsSDKVersion=
+
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat" -arch=x64
+
           cd /d C:\chromium\src
           call gn.bat gen "%OUT_DIR%"
 
@@ -88,9 +82,15 @@ jobs:
           cd /d C:\chromium\src
           call autoninja.bat -C "%OUT_DIR%" //components/cronet:cronet
 
+      - name: Package artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force C:\cronet-artifact\bin | Out-Null
+          Copy-Item "$env:OUT_DIR\cronet.dll" C:\cronet-artifact\bin\
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: cronet-windows-x64-latest
-          path: C:\chromium\src\out\Cronet\cronet.dll
+          path: C:\cronet-artifact
           retention-days: 7
