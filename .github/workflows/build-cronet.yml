@@ -19,7 +19,7 @@ env:
 jobs:
   linux-x64:
     name: Build Chromium Cronet Linux x64
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 360
 
     steps:
@@ -146,6 +146,7 @@ jobs:
             'is_component_build = false' \
             'is_official_build = false' \
             'is_cronet_build = true' \
+            'use_platform_icu_alternatives = false' \
             '' \
             '# Disable Chrome'"'"'s PGO profile lookup because --no-history does not' \
             '# checkout the optional profile files.' \
@@ -157,6 +158,11 @@ jobs:
             '' \
             'dcheck_always_on = false' \
             > "$OUT_DIR/args.gn"
+
+          sed -i '/^group("chromium_builder_perf") {/a\  data_deps = []' "$CHROMIUM_SRC/BUILD.gn"
+          sed -i '/^[[:space:]]*target(_test_target_type, "net_unittests") {/a\  configs = []' "$CHROMIUM_SRC/net/BUILD.gn"
+          grep -A1 -F 'target(_test_target_type, "net_unittests") {' "$CHROMIUM_SRC/net/BUILD.gn" \
+            | grep -Fq 'configs = []'
 
           GN="$CHROMIUM_SRC/buildtools/linux64/gn"
           test -x "$GN"
