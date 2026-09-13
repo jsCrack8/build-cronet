@@ -1,4 +1,4 @@
-name: Build Latest Chromium Cronet Linux x64
+name: Build Latest Chromium Cronet Windows x64
 
 on:
   workflow_dispatch:
@@ -8,279 +8,203 @@ on:
 permissions:
   contents: read
 
-env:
-  DEPOT_TOOLS: /home/runner/depot_tools
-  CHROMIUM_ROOT: /home/runner/chromium
-  CHROMIUM_SRC: /home/runner/chromium/src
-  OUT_DIR: /home/runner/chromium/src/out/Cronet
-  GIT_TERMINAL_PROMPT: '0'
-  DEPOT_TOOLS_UPDATE: '1'
-
 jobs:
-  linux-x64:
-    name: Linux x64 Cronet
-    runs-on: ubuntu-latest
+  windows-x64:
+    name: Windows x64 Cronet
+    runs-on: windows-2022
     timeout-minutes: 360
+
+    env:
+      DEPOT_TOOLS: C:\depot_tools
+      CHROMIUM_ROOT: C:\chromium
+      CHROMIUM_SRC: C:\chromium\src
+      OUT_DIR: C:\chromium\src\out\Cronet
+      GIT_TERMINAL_PROMPT: '0'
+      DEPOT_TOOLS_UPDATE: '1'
+      # 核心：通知 depot_tools 使用系统预装的 VS2022，不下载 Google 内部工具链
+      DEPOT_TOOLS_WIN_TOOLCHAIN: '0'
+      GYP_MSVS_VERSION: '2022'
 
     steps:
       - name: Show runner information
-        shell: bash
+        shell: pwsh
         run: |
-          set -euxo pipefail
-          echo "=== OS ==="
-          command -v uname
-          uname -a
-          cat /etc/os-release || true
-          echo "=== CPU ==="
-          command -v uname
-          uname -m
-          nproc
-          echo "=== Memory ==="
-          free -h
-          echo "=== Disk ==="
-          df -h /
+          Write-Host "=== OS Version ==="
+          [System.Environment]::OSVersion
+          Write-Host "=== CPU / Memory ==="
+          Get-CimInstance Win32_Processor | Select-Object Name, NumberOfCores, NumberOfLogicalProcessors
+          Get-CimInstance Win32_OperatingSystem | Select-Object TotalVisibleMemorySize, FreePhysicalMemory
+          Write-Host "=== Disk Free Space ==="
+          Get-PSDrive C
 
-      - name: Free unused runner disk space
-        shell: bash
+      - name: Free disk space
+        shell: pwsh
         run: |
-          set -euxo pipefail
+          Write-Host "Cleaning unused SDKs and tool caches to free disk space..."
+          $paths = @(
+            "C:\Android",
+            "C:\Program Files\Android",
+            "C:\hostedtoolcache\windows\Ruby",
+            "C:\hostedtoolcache\windows\Java*",
+            "C:\hostedtoolcache\windows\go",
+            "C:\hostedtoolcache\windows\Python",
+            "C:\hostedtoolcache\windows\CodeQL",
+            "C:\Program Files\dotnet",
+            "$env:TEMP\*"
+          )
+          foreach ($p in $paths) {
+            if (Test-Path $p) {
+              Remove-Item -Recurse -Force $p -ErrorAction SilentlyContinue
+            }
+          }
+          Write-Host "=== Disk space after cleanup ==="
+          Get-PSDrive C
 
-          sudo rm -rf \
-            /usr/local/lib/android \
-            /usr/local/.ghcup \
-            /opt/ghc \
-            /usr/share/dotnet \
-            /opt/hostedtoolcache/CodeQL \
-            /opt/hostedtoolcache/go \
-            /opt/hostedtoolcache/Python \
-            /opt/hostedtoolcache/Java_Temurin-Hotspot_jdk \
-            /opt/hostedtoolcache/node \
-            /opt/hostedtoolcache/Ruby \
-            /opt/az \
-            /usr/local/share/powershell \
-            /usr/share/swift \
-            /usr/local/aws-sam-cli \
-            /usr/local/lib/heroku \
-            /usr/local/share/vcpkg \
-            2>/dev/null || true
-
-          sudo apt-get clean || true
-          sudo rm -rf /var/lib/apt/lists/* /var/cache/apt/* /tmp/* || true
-          docker system prune -af --volumes 2>/dev/null || true
-
-          echo "=== Disk after cleanup ==="
-          df -h /
-
-      - name: Install host prerequisites
-        shell: bash
+      - name: Install depot_tools
+        shell: pwsh
         run: |
-          set -euxo pipefail
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            ca-certificates \
-            curl \
-            file \
-            git \
-            git-lfs \
-            lsb-release \
-            ninja-build \
-            pkg-config \
-            python3 \
-            rsync \
-            unzip \
-            zip
+          git clone --depth=1 https://chromium.googlesource.com/chromium/tools/depot_tools.git "$env:DEPOT_TOOLS"
+          
+          # depot_tools 必须在 PATH 的最前端
+          "$env:DEPOT_TOOLS" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          $env:PATH = "$env:DEPOT_TOOLS;$env:PATH"
 
-          git lfs install --skip-repo
-          python3 --version
-          git --version
-          ninja --version
+          # 初始化 depot_tools (引导自带的 Python/Git 环境)
+          & gclient.bat metrics --enable
+          & gclient.bat help
 
-      - name: Install and bootstrap latest depot_tools
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          rm -rf "$DEPOT_TOOLS"
-          git clone --depth=1 \
-            https://chromium.googlesource.com/chromium/tools/depot_tools.git \
-            "$DEPOT_TOOLS"
-
-          export PATH="$DEPOT_TOOLS:$PATH"
-          echo "$DEPOT_TOOLS" >> "$GITHUB_PATH"
-
-          cd /home/runner
-
-          # First gclient invocation bootstraps depot_tools' managed Python.
-          gclient --version
-
-          test -f "$DEPOT_TOOLS/python3_bin_reldir.txt"
-
-          command -v gclient
-          command -v fetch
-          command -v gn
-          command -v autoninja
-
-          gclient --version
-          gn --version
-          autoninja --version
-
-      - name: Install Chromium official build dependencies
-        shell: bash
-        run: |
-          set -euxo pipefail
-          export PATH="$DEPOT_TOOLS:$PATH"
-
-          tmpdir="$(mktemp -d)"
-          trap 'rm -rf "$tmpdir"' EXIT
-
-          git clone --depth=1 \
-            https://chromium.googlesource.com/chromium/src.git \
-            "$tmpdir/chromium"
-
-          cd "$tmpdir/chromium"
-
-          sudo ./build/install-build-deps.sh \
-            --no-prompt \
-            --no-arm \
-            --no-nacl \
-            --no-chromeos-fonts
+          Get-Command gclient.bat
+          Get-Command autoninja.bat
 
       - name: Checkout latest Chromium main without history
-        shell: bash
+        shell: cmd
         run: |
-          set -euxo pipefail
-          export PATH="$DEPOT_TOOLS:$PATH"
+          set "PATH=%DEPOT_TOOLS%;%PATH%"
+          if not exist "%CHROMIUM_ROOT%" mkdir "%CHROMIUM_ROOT%"
+          cd /d "%CHROMIUM_ROOT%"
 
-          rm -rf "$CHROMIUM_ROOT"
-          mkdir -p "$CHROMIUM_ROOT"
-          cd /home/runner
+          :: 浅拉取源码主干，不带历史记录
+          call fetch.bat --nohooks --no-history chromium
 
-          fetch --nohooks --no-history chromium
+          cd /d "%CHROMIUM_SRC%"
+          git rev-parse HEAD > C:\chromium_revision.txt
+          type chrome\VERSION > C:\chromium_version.txt
 
-          cd "$CHROMIUM_SRC"
-
-          git rev-parse HEAD | tee /home/runner/chromium_revision.txt
-
-          if [[ -f chrome/VERSION ]]; then
-            cat chrome/VERSION | tee /home/runner/chromium_version.txt
-          else
-            git describe --tags --always | tee /home/runner/chromium_version.txt
-          fi
-
-          df -h /
-
-      - name: Sync DEPS and run Chromium hooks
-        shell: bash
+      - name: Run Chromium hooks
+        shell: cmd
         run: |
-          set -euxo pipefail
-          export PATH="$DEPOT_TOOLS:$PATH"
-          cd "$CHROMIUM_SRC"
+          set "PATH=%DEPOT_TOOLS%;%PATH%"
+          cd /d "%CHROMIUM_SRC%"
+          :: 执行 Windows hook 生成依赖和工具链配置
+          call gclient.bat runhooks
 
-          gclient sync \
-            --no-history \
-            --force \
-            --reset \
-            -D
-
-          gclient runhooks
-
-          df -h /
-
-      - name: Generate GN files for Linux x64 Cronet
-        shell: bash
+      - name: Generate GN args
+        shell: pwsh
         run: |
-          set -euxo pipefail
-          export PATH="$DEPOT_TOOLS:$PATH"
-          cd "$CHROMIUM_SRC"
+          if (-not (Test-Path "$env:OUT_DIR")) {
+            New-Item -ItemType Directory -Force -Path "$env:OUT_DIR"
+          }
 
-          rm -rf "$OUT_DIR"
+          # 针对 GitHub Windows Runner (7GB内存) 调整的最优配置
+          # 禁用 ThinLTO 和 PGO 以防止内存溢出(OOM)
+          $gnArgs = @"
+          target_cpu = "x64"
+          is_debug = false
+          is_component_build = false
+          is_official_build = false
+          symbol_level = 0
+          blink_symbol_level = 0
+          v8_symbol_level = 0
+          dcheck_always_on = false
+          enable_nacl = false
+          use_thin_lto = false
+          chrome_pgo_phase = 0
+          use_goma = false
+          use_remoteexec = false
+          "@
 
-          gn gen "$OUT_DIR" --args='\
-          target_cpu = "x64"\
-          is_debug = false\
-          is_component_build = false\
-          is_official_build = true\
-          symbol_level = 0\
-          blink_symbol_level = 0\
-          v8_symbol_level = 0\
-          enable_nacl = false\
-          dcheck_always_on = false\
-          use_goma = false\
-          '
+          Set-Content -Path "$env:OUT_DIR\args.gn" -Value $gnArgs
+          Write-Host "=== args.gn ==="
+          Get-Content "$env:OUT_DIR\args.gn"
 
-          gn args "$OUT_DIR" --list > /home/runner/gn_args.txt
-          gn desc "$OUT_DIR" //components/cronet:cronet > /home/runner/gn_cronet_desc.txt
-
-      - name: Build Cronet shared library only
-        shell: bash
+      - name: GN generate
+        shell: cmd
         run: |
-          set -euxo pipefail
-          export PATH="$DEPOT_TOOLS:$PATH"
-          cd "$CHROMIUM_SRC"
+          set "PATH=%DEPOT_TOOLS%;%PATH%"
+          cd /d "%CHROMIUM_SRC%"
+          call gn.bat gen "%OUT_DIR%"
+          call gn.bat desc "%OUT_DIR%" //components/cronet:cronet > C:\gn_cronet_desc.txt
 
-          autoninja -C "$OUT_DIR" //components/cronet:cronet
-
-      - name: Collect and verify Cronet library
-        shell: bash
+      - name: Build Cronet DLL
+        shell: cmd
         run: |
-          set -euxo pipefail
-          cd "$CHROMIUM_SRC"
+          set "PATH=%DEPOT_TOOLS%;%PATH%"
+          cd /d "%CHROMIUM_SRC%"
+          :: 仅编译 cronet 动态库目标
+          call autoninja.bat -C "%OUT_DIR%" //components/cronet:cronet
 
-          mkdir -p /home/runner/cronet-artifact
+      - name: Package Cronet Artifacts
+        shell: pwsh
+        run: |
+          $artifactDir = "C:\cronet-artifact"
+          New-Item -ItemType Directory -Force -Path "$artifactDir\include" | Out-Null
+          New-Item -ItemType Directory -Force -Path "$artifactDir\bin" | Out-Null
+          New-Item -ItemType Directory -Force -Path "$artifactDir\lib" | Out-Null
 
-          found=""
-          while IFS= read -r f; do
-            found="$f"
-            break
-          done < <(find "$OUT_DIR" -type f \( -name 'libcronet.so' -o -name 'libcronet*.so' \) -print | sort)
+          # 检查 dll 和 lib
+          $dll = "$env:OUT_DIR\cronet.dll"
+          $lib = "$env:OUT_DIR\cronet.dll.lib"
 
-          if [[ -z "$found" ]]; then
-            echo "ERROR: Cronet .so was not produced."
-            echo "Available shared libraries:"
-            find "$OUT_DIR" -type f -name '*.so*' -print | head -200 || true
-            exit 1
-          fi
-
-          cp -L "$found" /home/runner/cronet-artifact/libcronet.so
-
-          echo "Source file: $found"
-          file /home/runner/cronet-artifact/libcronet.so
-          readelf -h /home/runner/cronet-artifact/libcronet.so
-
-          file /home/runner/cronet-artifact/libcronet.so | grep -E 'ELF 64-bit.*x86-64' || {
-            echo "ERROR: output is not Linux x86-64 ELF"
+          if (-not (Test-Path $dll)) {
+            Write-Error "ERROR: cronet.dll was not found!"
             exit 1
           }
 
-          sha256sum /home/runner/cronet-artifact/libcronet.so > /home/runner/cronet-artifact/SHA256SUMS.txt
+          Copy-Item $dll "$artifactDir\bin\"
+          if (Test-Path $lib) {
+            Copy-Item $lib "$artifactDir\lib\"
+          }
 
-          cat > /home/runner/cronet-artifact/build-info.txt <<EOF
-          Chromium revision: $(git -C "$CHROMIUM_SRC" rev-parse HEAD)
-          Chromium version: $(tr '\n' ' ' < "$CHROMIUM_SRC/chrome/VERSION" 2>/dev/null || true)
-          Runner: ubuntu-latest
-          Architecture: x86_64
-          GN target: //components/cronet:cronet
-          Original library: $found
-          EOF
+          # 提取 C/C++ 接口头文件
+          Copy-Item "$env:CHROMIUM_SRC\components\cronet\native\include\*.h" "$artifactDir\include\"
+          
+          # 拷贝由 GN 自动生成的 IDL 接口定义头文件
+          $genIdl = "$env:OUT_DIR\gen\components\cronet\native\cronet.idl_c.h"
+          if (Test-Path $genIdl) {
+            Copy-Item $genIdl "$artifactDir\include\"
+          }
 
-      - name: Upload Cronet artifact
+          # 生成构建信息
+          cd "$env:CHROMIUM_SRC"
+          $rev = git rev-parse HEAD
+          $ver = Get-Content "chrome\VERSION" -Raw
+          $info = @"
+          Chromium Revision: $rev
+          Chromium Version: $ver
+          Target: Windows x64 cronet.dll
+          Built on: GitHub Actions windows-2022
+          "@
+          Set-Content -Path "$artifactDir\build-info.txt" -Value $info
+
+          # 计算 SHA256
+          Get-FileHash "$artifactDir\bin\cronet.dll" -Algorithm SHA256 | Out-File "$artifactDir\SHA256SUMS.txt"
+
+      - name: Upload Cronet DLL and Headers
         uses: actions/upload-artifact@v4
         with:
-          name: cronet-linux-x64-latest
-          path: /home/runner/cronet-artifact
+          name: cronet-windows-x64-latest
+          path: C:\cronet-artifact
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
 
-      - name: Upload build metadata
+      - name: Upload Build Metadata
         uses: actions/upload-artifact@v4
         with:
-          name: cronet-linux-x64-build-metadata
+          name: cronet-windows-x64-metadata
           path: |
-            /home/runner/chromium_revision.txt
-            /home/runner/chromium_version.txt
-            /home/runner/gn_args.txt
-            /home/runner/gn_cronet_desc.txt
+            C:\chromium_revision.txt
+            C:\chromium_version.txt
+            C:\gn_cronet_desc.txt
           if-no-files-found: warn
           retention-days: 7
