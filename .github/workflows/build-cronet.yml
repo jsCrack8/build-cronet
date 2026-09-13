@@ -3,7 +3,7 @@ name: Build Latest Chromium Cronet Windows x64
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 2 * * *'
+    - cron: "0 2 * * *"
 
 permissions:
   contents: read
@@ -20,7 +20,6 @@ jobs:
       CHROMIUM_SRC: 'C:\chromium\src'
       OUT_DIR: 'C:\chromium\src\out\Cronet'
       GIT_TERMINAL_PROMPT: '0'
-      DEPOT_TOOLS_UPDATE: '1'
       DEPOT_TOOLS_WIN_TOOLCHAIN: '0'
       GYP_MSVS_VERSION: '2022'
 
@@ -31,20 +30,27 @@ jobs:
           git clone --depth=1 https://chromium.googlesource.com/chromium/tools/depot_tools.git C:\depot_tools
           Add-Content $env:GITHUB_PATH C:\depot_tools
 
-      - name: Setup Visual Studio Environment
+      - name: Detect Windows SDK
         shell: pwsh
         run: |
-          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-          if (-not $vs) {
-            throw "Visual Studio 2022 not found"
+          $sdk = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\Include' -Directory |
+            Where-Object { $_.Name -match '^10\.' } |
+            Sort-Object Name -Descending |
+            Select-Object -First 1
+
+          if (-not $sdk) {
+            throw 'Windows SDK not found'
           }
-          cmd /c "`"$vs\Common7\Tools\VsDevCmd.bat`" -arch=x64 && set" > vsenv.txt
+
+          "WINDOWS_SDK_VERSION=$($sdk.Name)" >> $env:GITHUB_ENV
+
+          Write-Host "SDK=$($sdk.Name)"
 
       - name: Checkout Chromium
         shell: cmd
         run: |
           set PATH=C:\depot_tools;%PATH%
-          if not exist C:\chromium mkdir C:\chromium
+          mkdir C:\chromium
           cd /d C:\chromium
           call fetch.bat --nohooks --no-history chromium
 
@@ -65,8 +71,7 @@ jobs:
             'is_component_build = false',
             'symbol_level = 0',
             'use_thin_lto = false',
-            'chrome_pgo_phase = 0',
-            'win_sdk_version = "10.0.26100.0"'
+            'chrome_pgo_phase = 0'
           ) | Out-File "$env:OUT_DIR\args.gn" -Encoding utf8
 
       - name: GN generate
@@ -87,5 +92,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: cronet-windows-x64-latest
-          path: 'C:\chromium\src\out\Cronet\cronet.dll'
+          path: C:\chromium\src\out\Cronet\cronet.dll
           retention-days: 7
