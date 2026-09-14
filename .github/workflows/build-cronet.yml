@@ -1,4 +1,4 @@
-name: Build Chromium 150 Cronet Linux x64
+name: Build Latest Chromium Cronet Linux x64
 
 on:
   workflow_dispatch:
@@ -7,7 +7,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: build-cronet-linux-x64-m150
+  group: build-latest-cronet-linux-x64
   cancel-in-progress: true
 
 env:
@@ -15,12 +15,11 @@ env:
   CHROMIUM_ROOT: /home/runner/chromium
   CHROMIUM_SRC: /home/runner/chromium/src
   OUT_DIR: /home/runner/chromium/src/out/Cronet
-  CHROMIUM_VERSION: 150.0.7871.63
 
 jobs:
   linux-x64:
     name: Build Chromium Cronet Linux x64
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     timeout-minutes: 360
 
     steps:
@@ -86,7 +85,6 @@ jobs:
 
           rm -rf /tmp/chromium-deps
           git clone --depth=1 \
-            --branch "$CHROMIUM_VERSION" \
             https://chromium.googlesource.com/chromium/src.git \
             /tmp/chromium-deps
 
@@ -99,7 +97,7 @@ jobs:
 
           rm -rf /tmp/chromium-deps
 
-      - name: Checkout Chromium 150.0.7871.63 without Git history
+      - name: Checkout latest Chromium main without Git history
         shell: bash
         run: |
           set -euxo pipefail
@@ -112,18 +110,11 @@ jobs:
           fetch --nohooks --no-history chromium
 
           cd "$CHROMIUM_SRC"
-          git fetch --depth=1 origin "refs/tags/$CHROMIUM_VERSION"
-          git checkout --detach FETCH_HEAD
-
           echo "Chromium revision:"
           git rev-parse HEAD | tee /home/runner/chromium_revision.txt
 
           echo "Chromium version:"
           cat chrome/VERSION | tee /home/runner/chromium_version.txt
-          grep -Fxq "MAJOR=150" chrome/VERSION
-          grep -Fxq "MINOR=0" chrome/VERSION
-          grep -Fxq "BUILD=7871" chrome/VERSION
-          grep -Fxq "PATCH=63" chrome/VERSION
 
       - name: Sync dependencies and run hooks
         shell: bash
@@ -138,138 +129,10 @@ jobs:
           test -x "$CHROMIUM_SRC/buildtools/linux64/gn"
           test -x "$DEPOT_TOOLS/autoninja"
 
-      - name: Add Linux Cronet native sources
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          reference_revision=72a06c9fca0e2d228588c7f3074bf7efff3ff686
-          raw_base="https://raw.githubusercontent.com/SagerNet/naiveproxy/$reference_revision/src"
-          linux_cronet_files=(
-            components/cronet/cronet_exports.lst
-            components/cronet/native/BUILD.gn
-            components/cronet/native/include/headers.gni
-            components/cronet/native/include/cronet_c.h
-            components/cronet/native/include/cronet_export.h
-            components/cronet/native/generated/cronet.idl_c.h
-            components/cronet/native/generated/cronet.idl_impl_interface.cc
-            components/cronet/native/generated/cronet.idl_impl_interface.h
-            components/cronet/native/generated/cronet.idl_impl_struct.cc
-            components/cronet/native/generated/cronet.idl_impl_struct.h
-            components/cronet/native/buffer.cc
-            components/cronet/native/engine.cc
-            components/cronet/native/engine.h
-            components/cronet/native/io_buffer_with_cronet_buffer.cc
-            components/cronet/native/io_buffer_with_cronet_buffer.h
-            components/cronet/native/native_metrics_util.cc
-            components/cronet/native/native_metrics_util.h
-            components/cronet/native/runnables.cc
-            components/cronet/native/runnables.h
-            components/cronet/native/upload_data_sink.cc
-            components/cronet/native/upload_data_sink.h
-            components/cronet/native/url_request.cc
-            components/cronet/native/url_request.h
-            components/cronet/cronet_context.cc
-            components/cronet/cronet_context.h
-            components/cronet/url_request_context_config.cc
-            components/cronet/url_request_context_config.h
-            components/grpc_support/BUILD.gn
-            components/grpc_support/include/headers.gni
-            components/grpc_support/include/bidirectional_stream_c.h
-            components/grpc_support/bidirectional_stream.cc
-            components/grpc_support/bidirectional_stream.h
-            components/grpc_support/bidirectional_stream_c.cc
-            net/socket/custom_client_socket_factory.cc
-            net/socket/custom_client_socket_factory.h
-          )
-
-          for relative_path in "${linux_cronet_files[@]}"; do
-            destination="$CHROMIUM_SRC/$relative_path"
-            mkdir -p "$(dirname "$destination")"
-            curl --fail --silent --show-error --location \
-              "$raw_base/$relative_path" \
-              --output "$destination"
-            test -s "$destination"
-          done
-
-          grep -Fq 'source_set("cronet_native_impl")' \
-            "$CHROMIUM_SRC/components/cronet/native/BUILD.gn"
-          grep -Fq 'source_set("grpc_support")' \
-            "$CHROMIUM_SRC/components/grpc_support/BUILD.gn"
-
       - name: Patch Cronet BUILD.gn for Linux
         shell: bash
         run: |
           set -euxo pipefail
-          python3 - "$CHROMIUM_SRC/BUILD.gn" <<'PY'
-          import sys
-          from pathlib import Path
-
-          path = Path(sys.argv[1])
-          text = path.read_text()
-          data_marker = '# BEGIN cronet data_deps initialization'
-          root_marker = '# BEGIN cronet root target'
-          if data_marker not in text:
-              old = 'group("chromium_builder_perf") {\n  testonly = true\n'
-              new = (
-                  'group("chromium_builder_perf") {\n'
-                  '  testonly = true\n'
-                  '  # BEGIN cronet data_deps initialization\n'
-                  '  data_deps = []\n'
-                  '  # END cronet data_deps initialization\n'
-              )
-              if text.count(old) != 1:
-                  raise SystemExit("Expected one chromium_builder_perf group")
-              path.write_text(text.replace(old, new, 1))
-
-          text = path.read_text()
-          if root_marker not in text:
-              old = (
-                  '    } else {\n'
-                  '      deps = []\n'
-                  '    }\n'
-                  '  } else {\n'
-              )
-              new = (
-                  '    } else {\n'
-                  '      # BEGIN cronet root target\n'
-                  '      deps = [ "//components/cronet:cronet" ]\n'
-                  '      # END cronet root target\n'
-                  '    }\n'
-                  '  } else {\n'
-              )
-              if text.count(old) != 1:
-                  raise SystemExit("Expected one non-Android Cronet root branch")
-              path.write_text(text.replace(old, new, 1))
-
-          text = path.read_text()
-          if data_marker not in text or root_marker not in text:
-              raise SystemExit("Root BUILD.gn patch was not applied")
-          PY
-
-          python3 - "$CHROMIUM_SRC/net/BUILD.gn" <<'PY'
-          import sys
-          from pathlib import Path
-
-          path = Path(sys.argv[1])
-          text = path.read_text()
-          marker = '# BEGIN cronet custom socket sources'
-          if marker not in text:
-              old = '    "socket/client_socket_factory.h",\n'
-              new = (
-                  old +
-                  '    # BEGIN cronet custom socket sources\n'
-                  '    "socket/custom_client_socket_factory.cc",\n'
-                  '    "socket/custom_client_socket_factory.h",\n'
-                  '    # END cronet custom socket sources\n'
-              )
-              if text.count(old) != 1:
-                  raise SystemExit("Expected one client_socket_factory source list")
-              path.write_text(text.replace(old, new, 1))
-          if marker not in path.read_text():
-              raise SystemExit("Net BUILD.gn patch was not applied")
-          PY
-
           python3 - "$CHROMIUM_SRC/components/cronet/BUILD.gn" <<'PY'
           import sys
           from pathlib import Path
@@ -279,50 +142,85 @@ jobs:
           marker = "# BEGIN linux cronet target"
 
           if marker not in text:
-              android_package = (
+              def replace_once(old, new, description):
+                  global text
+                  count = text.count(old)
+                  if count != 1:
+                      raise SystemExit(
+                          f"Expected one {description}, found {count}"
+                      )
+                  text = text.replace(old, new, 1)
+
+              replace_once(
+                  'import("//build/config/android/rules.gni")\n',
+                  'if (is_android) {\n'
+                  '  import("//build/config/android/rules.gni")\n'
+                  '}\n',
+                  "Android rules import",
+              )
+              replace_once(
+                  'proto_java_library("request_context_config_java_proto") {\n'
+                  '  proto_path = "."\n'
+                  '  sources = [ "proto/request_context_config.proto" ]\n'
+                  '}\n',
+                  'if (is_android) {\n'
+                  '  proto_java_library("request_context_config_java_proto") {\n'
+                  '    proto_path = "."\n'
+                  '    sources = [ "proto/request_context_config.proto" ]\n'
+                  '  }\n'
+                  '}\n',
+                  "Android proto target",
+              )
+              replace_once(
+                  '  public_deps = [ "//components/metrics:library_support" ]\n',
+                  '  if (!is_android) {\n'
+                  '    deps -= [ "//components/cronet/android:cronet_jni_headers" ]\n'
+                  '  }\n\n'
+                  '  public_deps = [ "//components/metrics:library_support" ]\n',
+                  "Cronet Android JNI dependency",
+              )
+              replace_once(
+                  '    "cronet_url_request.cc",\n'
+                  '    "cronet_url_request.h",\n',
+                  '',
+                  "Android Cronet URL request sources",
+              )
+              replace_once(
+                  'group("cronet_package") {\n'
+                  '  testonly = true\n'
+                  '  deps = [ "//components/cronet/android:cronet_package_android" ]\n'
+                  '}\n',
                   'if (is_android) {\n'
                   '  group("cronet_package") {\n'
                   '    testonly = true\n'
                   '    deps = [ "//components/cronet/android:cronet_package_android" ]\n'
                   '  }\n'
-                  '}\n'
+                  '}\n',
+                  "Android Cronet package group",
               )
-              if android_package not in text:
-                  raise SystemExit(
-                      "Expected Android Cronet package block with an is_android guard"
-                  )
 
-              linux_block = (
-                  "\n\n# BEGIN linux cronet target\n"
-                  "if (is_linux) {\n"
-                  '  static_library("cronet_static") {\n'
-                  "    deps = [\n"
-                  '      ":cronet_common",\n'
-                  '      "//components/cronet/native:cronet_native_impl",\n'
-                  '      "//components/grpc_support",\n'
-                  '      "//base",\n'
-                  '      "//net",\n'
-                  "    ]\n"
-                  '    sources = [ "cronet_global_state_stubs.cc" ]\n'
-                  "    complete_static_lib = true\n"
-                  '    configs -= [ "//build/config/compiler:thin_archive" ]\n'
-                  "  }\n\n"
-                  '  shared_library("cronet") {\n'
-                  "    deps = [\n"
-                  '      "//base",\n'
-                  '      ":cronet_common",\n'
-                  '      "//components/cronet/native:cronet_native_impl",\n'
-                  '      "//components/grpc_support",\n'
-                  '      "//net",\n'
-                  "    ]\n"
-                  '    sources = [ "cronet_global_state_stubs.cc" ]\n'
-                  '    inputs = [ "cronet_exports.lst" ]\n'
-                  '    ldflags = [ "-Wl,--version-script=" + rebase_path("cronet_exports.lst") ]\n'
-                  "  }\n"
-                  "}\n"
-                  "# END linux cronet target\n"
-              )
-              text = text.rstrip() + linux_block
+              text = text.rstrip() + '''
+
+          # BEGIN linux cronet target
+          if (is_linux) {
+            static_library("cronet_static") {
+              deps = [
+                ":cronet_common",
+                "//base",
+                "//net",
+              ]
+              sources = [ "cronet_global_state_stubs.cc" ]
+              complete_static_lib = true
+              configs += [ "//build/config/compiler:no_exit_time_destructors" ]
+              configs -= [ "//build/config/compiler:thin_archive" ]
+            }
+
+            shared_library("cronet") {
+              deps = [ ":cronet_static" ]
+            }
+          }
+          # END linux cronet target
+          '''
               path.write_text(text)
 
           if marker not in path.read_text():
@@ -342,12 +240,12 @@ jobs:
           printf '%s\n' \
             'target_cpu = "x64"' \
             'current_cpu = "x64"' \
-            'target_os = "linux"' \
             '' \
             'is_debug = false' \
             'is_component_build = false' \
             'is_official_build = false' \
-            'is_cronet_build = true' \
+            'is_cronet_build = false' \
+            'root_extra_deps = [ "//components/cronet:cronet" ]' \
             'use_platform_icu_alternatives = false' \
             '' \
             '# Disable Chrome'"'"'s PGO profile lookup because --no-history does not' \
@@ -409,7 +307,7 @@ jobs:
           {
             echo "Chromium revision: $(git -C "$CHROMIUM_SRC" rev-parse HEAD)"
             echo "Chromium version: $(tr '\n' ' ' < "$CHROMIUM_SRC/chrome/VERSION")"
-            echo "Runner: ubuntu-22.04"
+            echo "Runner: ubuntu-latest"
             echo "Architecture: x86_64"
             echo "GN target: //components/cronet:cronet"
             echo "Source library: $found"
@@ -418,7 +316,7 @@ jobs:
       - name: Upload Cronet artifact
         uses: actions/upload-artifact@v4
         with:
-          name: cronet-linux-x64-m150
+          name: cronet-linux-x64-latest
           path: /home/runner/cronet-artifact
           if-no-files-found: error
           compression-level: 0
