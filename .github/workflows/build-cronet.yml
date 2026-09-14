@@ -2,11 +2,6 @@ name: Build Chromium Cronet Linux SO
 
 on:
   workflow_dispatch:
-    inputs:
-      ninja_jobs:
-        description: Number of parallel Ninja jobs. Keep this low when RAM is limited.
-        required: false
-        default: "2"
   push:
     paths:
       - ".github/workflows/build-cronet-linux.yml"
@@ -17,7 +12,7 @@ permissions:
 env:
   CHROMIUM_VERSION: "153.0.8010.36"
   DEPOT_TOOLS_UPDATE: "0"
-  NINJA_JOBS: ${{ inputs.ninja_jobs || '2' }}
+  NINJA_JOBS: "2"
   PYTHONUNBUFFERED: "1"
 
 jobs:
