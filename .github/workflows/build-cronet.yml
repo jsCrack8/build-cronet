@@ -84,6 +84,15 @@ jobs:
             "${BUILD_ROOT}/depot_tools"
           export PATH="${BUILD_ROOT}/depot_tools:${PATH}"
 
+          # DEPOT_TOOLS_UPDATE=0 disables automatic self-update, so bootstrap
+          # the bundled Python runtime explicitly before the first gclient or
+          # fetch invocation.
+          cd "${BUILD_ROOT}/depot_tools"
+          bash ./ensure_bootstrap
+          test -f "${BUILD_ROOT}/depot_tools/python3_bin_reldir.txt"
+          command -v gclient
+          command -v fetch
+
           cd "${BUILD_ROOT}"
           fetch --nohooks --no-history chromium
           cd src
